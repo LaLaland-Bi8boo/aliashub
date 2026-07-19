@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import html
+import ipaddress
 import re
 import time
 from urllib.parse import urlparse
@@ -50,6 +51,21 @@ def _normalize_base_url(value: str) -> str:
     if not parsed.scheme or not parsed.netloc:
         raise ValueError(f"outlookEmail 服务地址无效: {value!r}")
     return raw.rstrip("/")
+
+
+def _is_internal_service_url(value: str) -> bool:
+    hostname = (urlparse(value).hostname or "").strip().lower().rstrip(".")
+    if not hostname:
+        return False
+    if hostname in {"localhost", "host.docker.internal"} or "." not in hostname:
+        return True
+    if hostname.endswith((".local", ".internal")):
+        return True
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        return False
+    return address.is_private or address.is_loopback or address.is_link_local
 
 
 def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
@@ -116,7 +132,8 @@ class OutlookEmailMailbox(BaseMailbox):
         self.skip_tag_names = _split_names(skip_tag_names)
         self.register_success_tag_names = _split_names(register_success_tag_names)
         self.plus_success_tag_names = _split_names(plus_success_tag_names)
-        self.proxy = {"http": proxy, "https": proxy} if proxy else None
+        self.direct_internal_api = _is_internal_service_url(self.api)
+        self.proxy = {"http": proxy, "https": proxy} if proxy and not self.direct_internal_api else None
         self._session: requests.Session | None = None
         self._admin_session: requests.Session | None = None
         self._csrf_token: str = ""
@@ -156,6 +173,8 @@ class OutlookEmailMailbox(BaseMailbox):
     def _get_session(self) -> requests.Session:
         if self._session is None:
             session = requests.Session()
+            if self.direct_internal_api:
+                session.trust_env = False
             session.proxies = self.proxy or {}
             mark_session_insecure(session)
             session.headers.update(
@@ -201,6 +220,8 @@ class OutlookEmailMailbox(BaseMailbox):
             raise RuntimeError("outlookEmail 未配置管理员密码，无法执行打标签")
 
         session = requests.Session()
+        if self.direct_internal_api:
+            session.trust_env = False
         session.proxies = self.proxy or {}
         mark_session_insecure(session)
         session.headers.update(
