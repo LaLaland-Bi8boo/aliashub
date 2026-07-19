@@ -25,7 +25,9 @@ export function publicAccount(db, row) {
     ? Boolean(db.prepare("SELECT 1 FROM google_tokens WHERE account_id = ?").get(row.id))
     : provider === "microsoft"
       ? Boolean(db.prepare("SELECT 1 FROM microsoft_tokens WHERE account_id = ?").get(row.id))
-      : false;
+      : provider === "xunmail"
+        ? Boolean(db.prepare("SELECT 1 FROM xunmail_tokens WHERE account_id = ?").get(row.id))
+        : false;
   return {
     ...row,
     provider,
@@ -36,7 +38,7 @@ export function publicAccount(db, row) {
     address_count: counts.address_count || 0,
     oauth_connected: oauthConnected,
     supports_official_aliases: provider === "microsoft",
-    supports_plus_aliases: ["microsoft", "google"].includes(provider),
+    supports_plus_aliases: ["microsoft", "google", "xunmail"].includes(provider),
   };
 }
 
@@ -331,7 +333,9 @@ export class JobRunner {
     if (!account) return this.updateJob(job.id, { status: "failed", message: "源头邮箱不存在", finished_at: nowIso() });
     this.updateJob(job.id, {
       status: "running",
-      message: account.provider === "google" ? "正在读取 Gmail 收件箱" : "正在读取 Outlook 收件箱",
+      message: account.provider === "google"
+        ? "正在读取 Gmail 收件箱"
+        : account.provider === "xunmail" ? "正在通过 Xunmail 读取收件箱" : "正在读取 Outlook 收件箱",
       started_at: nowIso(),
     });
     try {

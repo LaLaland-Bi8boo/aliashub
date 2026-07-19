@@ -166,6 +166,13 @@ const schema = `
     token_updated_at TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS xunmail_tokens (
+    account_id INTEGER PRIMARY KEY REFERENCES source_accounts(id) ON DELETE CASCADE,
+    client_id TEXT NOT NULL DEFAULT '',
+    refresh_token_encrypted TEXT NOT NULL,
+    token_updated_at TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS oauth_code_sessions (
     id TEXT PRIMARY KEY,
     expected_account_id INTEGER REFERENCES source_accounts(id) ON DELETE SET NULL,

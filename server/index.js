@@ -13,6 +13,7 @@ import { MicrosoftGraphClient } from "./microsoft-graph.js";
 import { NfapiService } from "./nfapi-service.js";
 import { RegistrationClient } from "./registration-client.js";
 import { RegistrationService } from "./registration-service.js";
+import { XunmailClient } from "./xunmail-client.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, "..");
@@ -289,10 +290,17 @@ export function createApp(options = {}) {
     clientSecret: options.googleClientSecret,
     redirectUri: options.googleRedirectUri,
   });
+  const xunmail = options.xunmail || new XunmailClient({
+    db,
+    encryptionKey: options.dataEncryptionKey || process.env.DATA_ENCRYPTION_KEY,
+    fetchFn: options.xunmailFetchFn || options.fetchFn,
+    baseUrl: options.xunmailBaseUrl || process.env.XUNMAIL_BASE_URL,
+  });
   const inbox = options.inbox || {
     scanInbox(account) {
       if (account.provider === "google") return gmail.scanInbox(account);
       if (account.provider === "microsoft") return graph.scanInbox(account);
+      if (account.provider === "xunmail") return xunmail.scanInbox(account);
       throw Object.assign(new Error(`不支持的邮箱提供商：${account.provider}`), {
         status: 409,
         code: "UNSUPPORTED_MAIL_PROVIDER",
@@ -502,6 +510,11 @@ export function createApp(options = {}) {
     catch (error) { next(error); }
   });
 
+  app.post("/api/xunmail/import", async (req, res, next) => {
+    try { res.status(201).json(await xunmail.importCredentials(req.body?.credential)); }
+    catch (error) { next(error); }
+  });
+
   app.get("/api/overview", (_req, res) => {
     const accounts = db.prepare(`
       SELECT COUNT(*) AS total,
@@ -558,6 +571,7 @@ export function createApp(options = {}) {
       providers: {
         microsoft: { supportsOfficialAliases: true, supportsPlusAliases: true },
         google: { supportsOfficialAliases: false, supportsPlusAliases: true },
+        xunmail: { supportsOfficialAliases: false, supportsPlusAliases: true },
       },
     });
   });
@@ -1145,7 +1159,7 @@ export function createApp(options = {}) {
     if (status >= 500) console.error(error);
     res.status(status).json({ error: status >= 500 ? "服务器处理请求失败" : error.message });
   });
-  return { app, db, graph, gmail, inbox, extension, jobs, registration, nfapi };
+  return { app, db, graph, gmail, xunmail, inbox, extension, jobs, registration, nfapi };
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

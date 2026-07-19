@@ -21,10 +21,23 @@ export const MAIL_PROVIDERS = {
     supportsOfficialAliases: false,
     supportsPlusAliases: true,
   },
+  xunmail: {
+    id: "xunmail",
+    name: "Xunmail",
+    accountLabel: "Xunmail 邮箱",
+    description: "粘贴 Xunmail Graph 格式凭据",
+    shortDescription: "Graph API 取件",
+    oauthBase: null,
+    popupName: null,
+    supportsOfficialAliases: false,
+    supportsPlusAliases: true,
+  },
 };
 
 export function normalizeProvider(value) {
-  return value === "google" ? "google" : "microsoft";
+  if (value === "google") return "google";
+  if (value === "xunmail") return "xunmail";
+  return "microsoft";
 }
 
 export function providerMeta(value) {
