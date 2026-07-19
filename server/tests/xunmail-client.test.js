@@ -40,6 +40,7 @@ test("parses the four-part Xunmail format without retaining the password", () =>
     clientId: CLIENT_ID,
     refreshToken: REFRESH_TOKEN,
   });
+  assert.equal(parseCredentialLine(`${EMAIL}----${PASSWORD}----${CLIENT_ID}----token！part`).refreshToken, "token!part");
   assert.throws(() => parseCredentialLine(`${EMAIL}----${PASSWORD}`), (error) => error.code === "INVALID_XUNMAIL_FORMAT");
 });
 
@@ -51,7 +52,8 @@ test("validates Xunmail credentials and stores only an encrypted Graph refresh t
     encryptionKey: "test-key",
     fetchFn: async (url, options) => {
       calls.push({ url: String(url), body: JSON.parse(options.body) });
-      return json({ count: 4, refresh_token: "rotated-token" });
+      if (String(url).endsWith("/refresh-token")) return json({ success: true, refresh_token: "rotated-token" });
+      return json({ count: 4 });
     },
   });
   try {
@@ -60,11 +62,16 @@ test("validates Xunmail credentials and stores only an encrypted Graph refresh t
     assert.equal(result.account.provider, "xunmail");
     assert.equal(result.account.oauth_connected, true);
     assert.equal(result.account.supports_official_aliases, false);
-    assert.equal(calls[0].url, "https://www.xunmail.cn/api/graph/mail-count");
+    assert.equal(calls[0].url, "https://www.xunmail.cn/api/graph/refresh-token");
     assert.deepEqual(calls[0].body, {
-      email: EMAIL,
       client_id: CLIENT_ID,
       refresh_token: REFRESH_TOKEN,
+    });
+    assert.equal(calls[1].url, "https://www.xunmail.cn/api/graph/mail-count");
+    assert.deepEqual(calls[1].body, {
+      email: EMAIL,
+      client_id: CLIENT_ID,
+      refresh_token: "rotated-token",
       mailbox: "INBOX",
     });
     assert.equal(Object.values(calls[0].body).includes(PASSWORD), false);
@@ -92,6 +99,7 @@ test("scans Xunmail Graph mail into the existing message and verification-code s
     encryptionKey: "test-key",
     fetchFn: async (url) => {
       call += 1;
+      if (String(url).endsWith("/refresh-token")) return json({ success: true, refresh_token: REFRESH_TOKEN });
       if (String(url).endsWith("/mail-count")) return json({ count: 1 });
       if (String(url).endsWith("/mail-all")) {
         return json({
@@ -113,7 +121,7 @@ test("scans Xunmail Graph mail into the existing message and verification-code s
     const imported = await xunmail.importCredential(CREDENTIAL);
     const account = current.db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(imported.account.id);
     const result = await xunmail.scanInbox(account);
-    assert.equal(call, 2);
+    assert.equal(call, 3);
     assert.equal(result.messages.length, 1);
     assert.equal(result.items.length, 1);
     assert.equal(result.messages[0].graphMessageId, "message-1");
@@ -134,6 +142,10 @@ test("refreshes an expired Xunmail token once and retries the inbox request", as
     encryptionKey: "test-key",
     fetchFn: async (url, options) => {
       const body = JSON.parse(options.body);
+      if (String(url).endsWith("/refresh-token") && mailAttempts === 0) {
+        assert.equal(body.refresh_token, REFRESH_TOKEN);
+        return json({ success: true, refresh_token: REFRESH_TOKEN });
+      }
       if (String(url).endsWith("/mail-count")) return json({ count: 0 });
       if (String(url).endsWith("/refresh-token")) {
         assert.equal(body.refresh_token, REFRESH_TOKEN);
@@ -164,7 +176,9 @@ test("exposes the Xunmail importer through the authenticated AliasHub API", asyn
   const runtime = createApp({
     db: current.db,
     dataEncryptionKey: "test-key",
-    xunmailFetchFn: async () => json({ count: 2 }),
+    xunmailFetchFn: async (url) => String(url).endsWith("/refresh-token")
+      ? json({ success: true, refresh_token: REFRESH_TOKEN })
+      : json({ count: 2 }),
   });
   try {
     const imported = await jsonRequest(runtime.app, "/api/xunmail/import", {
@@ -193,7 +207,9 @@ test("imports multiple Xunmail lines without exposing their password fields", as
     fetchFn: async (_url, options) => {
       const body = JSON.parse(options.body);
       seen.push(body);
-      return json({ count: 0 });
+      return String(_url).endsWith("/refresh-token")
+        ? json({ success: true, refresh_token: body.refresh_token })
+        : json({ count: 0 });
     },
   });
   const second = "second@hotmail.com----second-password----second-client----second-token";

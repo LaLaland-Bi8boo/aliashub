@@ -47,7 +47,9 @@ function parseCredentialLine(value) {
   const email = normalizeMicrosoftEmail(parts.shift());
   const password = parts.shift().trim();
   const clientId = parts.shift().trim();
-  const refreshToken = parts.join("----").trim();
+  const refreshToken = parts.join("----").trim().replace(/[\uFF01-\uFF5E]/g, (character) => (
+    String.fromCharCode(character.charCodeAt(0) - 0xfee0)
+  ));
   if (!email) throw errorWithStatus("只支持 Outlook、Hotmail、Live 和 MSN 邮箱", 422, "UNSUPPORTED_XUNMAIL_EMAIL");
   if (!password) throw errorWithStatus("Xunmail 格式中的密码字段不能为空", 400, "INVALID_XUNMAIL_FORMAT");
   if (!clientId || !refreshToken) throw errorWithStatus("client_id 和 refresh_token 不能为空", 400, "INVALID_XUNMAIL_FORMAT");
@@ -146,6 +148,7 @@ export class XunmailClient {
 
   async importCredential(value) {
     const credentials = parseCredentialLine(value);
+    credentials.refreshToken = await this.refreshRemoteToken(credentials);
     const countResult = await this.mailCount(credentials);
     if (!countResult.response.ok || countResult.data?.success === false || countResult.data?.error) {
       throw errorWithStatus(countResult.data?.error || "Xunmail 无法验证这组邮箱凭据", countResult.response.status || 502, "XUNMAIL_CREDENTIALS_REJECTED");
