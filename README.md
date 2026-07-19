@@ -4,6 +4,30 @@ AliasHub is a self-hosted mailbox and account-operations hub for Microsoft
 Outlook and Google Gmail/Workspace accounts. It keeps mailbox OAuth tokens and
 service credentials on the installation that you control.
 
+## Extended fork
+
+This repository is an extended fork of the upstream
+[1120393079/aliashub](https://github.com/1120393079/aliashub) project. It keeps
+the upstream copyright notices and is distributed under the same
+`AGPL-3.0-only` license.
+
+The extended version adds and refines:
+
+- Xunmail credential import and Graph mailbox access;
+- Camoufox-based registration and reusable authenticated noVNC sessions;
+- separation between the registration browser proxy and direct internal
+  AliasHub mailbox traffic;
+- reliable verification-code extraction from plain-text and HTML email;
+- Xunmail delivery fallback when the upstream mail response omits recipient
+  metadata.
+
+### 上游项目与致谢
+
+本仓库是 [AliasHub](https://github.com/1120393079/aliashub) 的扩展版本，
+保留原项目的版权声明，并继续遵循 GNU Affero General Public License v3.0。
+本扩展主要补充了 Xunmail 邮箱接入、Camoufox 注册流程、代理隔离、内置
+noVNC 会话以及验证码取件能力。
+
 ## Features
 
 - Connect multiple Microsoft and Google source mailboxes with OAuth.

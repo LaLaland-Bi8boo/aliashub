@@ -7,12 +7,12 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/1120393079/aliashub.git"
+    "url": "git+https://github.com/LaLaland-Bi8boo/aliashub.git"
   },
   "bugs": {
-    "url": "https://github.com/1120393079/aliashub/issues"
+    "url": "https://github.com/LaLaland-Bi8boo/aliashub/issues"
   },
-  "homepage": "https://github.com/1120393079/aliashub#readme",
+  "homepage": "https://github.com/LaLaland-Bi8boo/aliashub#readme",
   "keywords": [
     "email-alias",
     "self-hosted",
