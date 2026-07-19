@@ -2543,7 +2543,7 @@ export class RegistrationService {
     }
     const address = this.db.prepare(`
       SELECT addresses.*, source_accounts.status AS account_status, source_accounts.email AS source_email,
-        source_accounts.last_inbox_scan_at
+        source_accounts.provider AS account_provider, source_accounts.last_inbox_scan_at
       FROM addresses JOIN source_accounts ON source_accounts.id = addresses.account_id
       WHERE addresses.address = ? COLLATE NOCASE
     `).get(email);
@@ -2552,8 +2552,22 @@ export class RegistrationService {
       const account = this.db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(address.account_id);
       await this.scanAccount(account);
     }
-    const conditions = ["(mail_messages.address_id = ? OR mail_messages.recipient_address = ? COLLATE NOCASE)"];
-    const params = [address.id, email];
+    const exactRecipient = "(mail_messages.address_id = ? OR mail_messages.recipient_address = ? COLLATE NOCASE)";
+    const xunmailWithoutRecipient = `(
+      mail_messages.account_id = ?
+      AND mail_messages.address_id IS NULL
+      AND TRIM(mail_messages.recipient_address) = ''
+      AND COALESCE(NULLIF(TRIM(mail_messages.to_recipients), ''), '[]') = '[]'
+      AND COALESCE(NULLIF(TRIM(mail_messages.cc_recipients), ''), '[]') = '[]'
+      AND mail_messages.received_at >= ?
+    )`;
+    const addressScope = address.account_provider === "xunmail"
+      ? `(${exactRecipient} OR ${xunmailWithoutRecipient})`
+      : exactRecipient;
+    const conditions = [addressScope];
+    const params = address.account_provider === "xunmail"
+      ? [address.id, email, address.account_id, address.created_at]
+      : [address.id, email];
     if (query.subject_contains) { conditions.push("mail_messages.subject LIKE ?"); params.push(`%${query.subject_contains}%`); }
     if (query.from_contains) { conditions.push("mail_messages.sender_address LIKE ?"); params.push(`%${query.from_contains}%`); }
     if (query.keyword) {

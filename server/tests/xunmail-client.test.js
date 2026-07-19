@@ -106,11 +106,12 @@ test("scans Xunmail Graph mail into the existing message and verification-code s
           refresh_token: "mail-rotated-token",
           mails: [{
             id: "message-1",
-            subject: "Your verification code is 654321",
-            body: "Enter 654321 to continue.",
-            sender: "Service <service@example.com>",
-            to: [EMAIL],
-            received_at: "2026-07-19T09:00:00.000Z",
+            subject: "ChatGPT の一時的な認証コード",
+            content: "この一時検証コードを入力して続行してください: 654321",
+            body: "<html><style>.code { width: 123456px }</style><body><p>検証コード</p><strong>654321</strong></body></html>",
+            fullContent: "This lower-priority field should not replace body.",
+            from_email: "noreply@openai.com",
+            date: "2026-07-19T12:00:38.000Z",
           }],
         });
       }
@@ -126,6 +127,10 @@ test("scans Xunmail Graph mail into the existing message and verification-code s
     assert.equal(result.items.length, 1);
     assert.equal(result.messages[0].graphMessageId, "message-1");
     assert.equal(result.messages[0].verificationCode, "654321");
+    assert.equal(result.messages[0].senderAddress, "noreply@openai.com");
+    assert.equal(result.messages[0].preview, "この一時検証コードを入力して続行してください: 654321");
+    assert.match(result.messages[0].body, /^<html>/);
+    assert.equal(result.messages[0].bodyContentType, "html");
     assert.equal(result.items[0].code, "654321");
     const token = current.db.prepare("SELECT * FROM xunmail_tokens WHERE account_id = ?").get(account.id);
     assert.equal(xunmail.decrypt(token.refresh_token_encrypted), "mail-rotated-token");

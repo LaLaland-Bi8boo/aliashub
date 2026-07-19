@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { publicAccount } from "./account-service.js";
-import { codeFromText, normalizeMicrosoftEmail } from "./address-generator.js";
+import { codeFromText, normalizeEmail, normalizeMicrosoftEmail } from "./address-generator.js";
 import { audit, createSourceAccount, nowIso } from "./db.js";
 
 const DEFAULT_BASE_URL = "https://www.xunmail.cn";
@@ -24,7 +24,27 @@ function firstValue(...values) {
 
 function emailFrom(value) {
   const matches = scalar(value).match(EMAIL_PATTERN) || [];
-  return matches.map((item) => normalizeMicrosoftEmail(item)).find(Boolean) || "";
+  return matches.map((item) => normalizeEmail(item)).find(Boolean) || "";
+}
+
+function htmlToText(value) {
+  return scalar(value)
+    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/p\s*>|<\/div\s*>|<\/li\s*>|<\/tr\s*>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&#(x[0-9a-f]+|\d+);/gi, (match, entity) => {
+      const codePoint = entity.toLowerCase().startsWith("x")
+        ? Number.parseInt(entity.slice(1), 16)
+        : Number.parseInt(entity, 10);
+      try { return String.fromCodePoint(codePoint); } catch { return match; }
+    })
+    .replace(/&(nbsp|amp|lt|gt|quot|apos|#39);/gi, (match, entity) => ({
+      nbsp: " ", amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", "#39": "'",
+    })[entity.toLowerCase()] || match)
+    .replace(/[ \t\f\v]+/g, " ")
+    .replace(/\s*\n\s*/g, "\n")
+    .trim();
 }
 
 function addressesFrom(value) {
@@ -225,15 +245,20 @@ export class XunmailClient {
     const toRecipients = addressesFrom(mail?.to || mail?.to_recipients || mail?.recipients || mail?.recipient);
     const ccRecipients = addressesFrom(mail?.cc || mail?.cc_recipients);
     const recipients = [...new Set([...toRecipients, ...ccRecipients].map((item) => item.address).filter(Boolean))];
-    const recipient = recipients.find((value) => normalizeMicrosoftEmail(value)) || "";
+    const recipient = recipients.find((value) => normalizeEmail(value)) || "";
     const subject = firstValue(mail?.subject, mail?.title) || "(无主题)";
-    const rawBody = firstValue(mail?.body, mail?.content, mail?.text, mail?.html, mail?.body_text);
+    const plainBody = firstValue(mail?.content, mail?.text, mail?.body_text);
+    const rawBody = firstValue(mail?.body, mail?.html, mail?.fullContent, plainBody);
     const body = rawBody.slice(0, MAIL_BODY_LIMIT);
-    const preview = firstValue(mail?.preview, mail?.snippet, body).replace(/\s+/g, " ").slice(0, 500);
+    const bodyText = htmlToText(rawBody);
+    const preview = htmlToText(firstValue(mail?.preview, mail?.snippet, plainBody, bodyText))
+      .replace(/\s+/g, " ")
+      .slice(0, 500);
     const receivedAt = firstValue(mail?.received_at, mail?.receivedAt, mail?.date, mail?.created_at) || nowIso();
     const suppliedId = firstValue(mail?.id, mail?.message_id, mail?.internet_message_id, mail?.uid);
     const graphMessageId = suppliedId || `xunmail-${crypto.createHash("sha256").update(`${subject}\n${receivedAt}\n${senderAddress}\n${body}`).digest("hex")}`;
-    const verificationCode = firstValue(mail?.verification_code, mail?.verificationCode) || codeFromText(`${subject}\n${preview}\n${body}`);
+    const verificationCode = firstValue(mail?.verification_code, mail?.verificationCode)
+      || codeFromText(`${subject}\n${plainBody}\n${bodyText}`);
     const sender = senderName || senderAddress || "未知发件人";
     return {
       fingerprint: crypto.createHash("sha256").update(`${account.id}:${graphMessageId}`).digest("hex"),
@@ -248,7 +273,8 @@ export class XunmailClient {
       subject,
       preview,
       body,
-      bodyContentType: firstValue(mail?.body_content_type, mail?.content_type) || "text",
+      bodyContentType: firstValue(mail?.body_content_type, mail?.content_type)
+        || (/<[a-z][\s\S]*>/i.test(rawBody) ? "html" : "text"),
       bodyTruncated: rawBody.length > MAIL_BODY_LIMIT,
       verificationCode,
       webLink: firstValue(mail?.web_link, mail?.webLink),

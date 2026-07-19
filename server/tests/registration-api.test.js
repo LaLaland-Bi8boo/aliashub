@@ -137,7 +137,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
       return scanResult;
     },
   };
-  const runtime = createApp({ db, graph, registrationClient: client, publicBaseUrl: "https://alias.test/alias-hub" });
+  const runtime = createApp({ db, graph, inbox: graph, registrationClient: client, publicBaseUrl: "https://alias.test/alias-hub" });
   let configuredPasswordEmail = "";
   let legacyPasswordEmail = "";
   let proxyFailureLogs = [];
@@ -1178,6 +1178,46 @@ test("registration integration generates isolated addresses and exposes mailbox 
       assert.equal(registeredMailbox.body.emails[0].body_preview, "Use 654321 to continue");
       assert.equal(graph.scanCalls, 1);
 
+      db.prepare("UPDATE source_accounts SET provider = 'xunmail', last_inbox_scan_at = NULL, updated_at = ? WHERE id = ?")
+        .run(nowIso(), account.id);
+      scanResult = {
+        stage: "completed",
+        messages: [{
+          fingerprint: "xunmail-unassigned-message",
+          graphMessageId: "graph-xunmail-unassigned-message",
+          senderAddress: "noreply@openai.com",
+          recipient: "",
+          recipients: [],
+          subject: "ChatGPT の一時的な認証コード",
+          preview: "検証コード: 777888",
+          body: "検証コード: 777888",
+          verificationCode: "777888",
+          receivedAt,
+        }],
+        items: [],
+      };
+      const xunmailMailbox = await jsonRequest(runtime.app, `/api/external/emails?email=${encodeURIComponent(job.email)}`, {
+        headers: { "x-api-key": "test-connector-key" },
+      });
+      assert.equal(xunmailMailbox.response.status, 200);
+      const unassigned = xunmailMailbox.body.emails.find((item) => item.message_id === "graph-xunmail-unassigned-message");
+      assert.equal(unassigned.verification_code, "777888");
+
+      const repeatedXunmailMailbox = await jsonRequest(runtime.app, `/api/external/emails?email=${encodeURIComponent(job.email)}`, {
+        headers: { "x-api-key": "test-connector-key" },
+      });
+      assert.equal(
+        repeatedXunmailMailbox.body.emails.find((item) => item.message_id === "graph-xunmail-unassigned-message").id,
+        unassigned.id,
+      );
+
+      db.prepare("UPDATE source_accounts SET provider = 'microsoft', updated_at = ? WHERE id = ?").run(nowIso(), account.id);
+      scanResult = { stage: "completed", messages: [], items: [] };
+      const microsoftMailbox = await jsonRequest(runtime.app, `/api/external/emails?email=${encodeURIComponent(job.email)}`, {
+        headers: { "x-api-key": "test-connector-key" },
+      });
+      assert.equal(microsoftMailbox.body.emails.some((item) => item.message_id === "graph-xunmail-unassigned-message"), false);
+
       for (const top of ["0", "1.5", "51", "not-a-number"]) {
         const invalidTop = await jsonRequest(
           runtime.app,
@@ -1186,7 +1226,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
         assert.equal(invalidTop.response.status, 400, top);
         assert.match(invalidTop.body.error, /top.*整数/);
       }
-      assert.equal(graph.scanCalls, 1);
+      assert.equal(graph.scanCalls, 2);
 
       const originalGetAccount = client.getAccount.bind(client);
       const remoteAccount = await originalGetAccount(job.external_account_id);
@@ -1198,7 +1238,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
         `/api/registration/accounts/${job.external_account_id}/emails`,
       );
       assert.equal(mismatchedEmail.response.status, 409);
-      assert.equal(graph.scanCalls, 1);
+      assert.equal(graph.scanCalls, 2);
 
       client.getAccount = async (id) => Number(id) === Number(job.external_account_id)
         ? { ...remoteAccount, platform: "cursor" }
@@ -1208,7 +1248,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
         `/api/registration/accounts/${job.external_account_id}/emails`,
       );
       assert.equal(wrongPlatform.response.status, 409);
-      assert.equal(graph.scanCalls, 1);
+      assert.equal(graph.scanCalls, 2);
 
       const failedOnlyId = 777;
       const failedOnlyEmail = "failed-only@example.com";
@@ -1222,7 +1262,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
         : originalGetAccount(id);
       const failedOnly = await jsonRequest(runtime.app, `/api/registration/accounts/${failedOnlyId}/emails`);
       assert.equal(failedOnly.response.status, 409);
-      assert.equal(graph.scanCalls, 1);
+      assert.equal(graph.scanCalls, 2);
       db.prepare("DELETE FROM registration_jobs WHERE external_account_id = ?").run(String(failedOnlyId));
       client.getAccount = originalGetAccount;
 
