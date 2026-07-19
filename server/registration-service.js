@@ -1387,7 +1387,7 @@ export class RegistrationService {
     this.client = client;
     this.connectorKey = getSetting(db, "registration_connector_key", "");
     this.mailboxBaseUrl = String(mailboxBaseUrl || publicBaseUrl || "").replace(/\/$/, "");
-    this.browserUrl = browserUrl || "/alias-hub/browser/vnc.html?autoconnect=true&resize=scale&path=websockify";
+    this.browserUrl = browserUrl || "/alias-hub/browser/vnc.html?autoconnect=true&resize=scale&path=alias-hub/browser/websockify";
     this.scanPromises = new Map();
     this.accountStatusRefreshAttempts = new Map();
     this.accountStatusCheckOutcomes = new Map();

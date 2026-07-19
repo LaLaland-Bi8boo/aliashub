@@ -9,8 +9,10 @@ export DISPLAY=:99
 # 等待 Xvfb 就绪
 sleep 1
 
-# 启动 x11vnc（无密码，仅本地 VNC）
-if [ -n "$VNC_PASSWORD" ]; then
+# 启动 x11vnc。仅当 noVNC 绑定本机并由同源认证代理保护时才允许免二次密码。
+if [ "${VNC_TRUST_PROXY:-false}" = "true" ]; then
+    x11vnc -display :99 -nopw -forever -shared &
+elif [ -n "$VNC_PASSWORD" ]; then
     x11vnc -storepasswd "$VNC_PASSWORD" /tmp/vncpass >/dev/null
     chmod 600 /tmp/vncpass
     x11vnc -display :99 -rfbauth /tmp/vncpass -forever -shared &

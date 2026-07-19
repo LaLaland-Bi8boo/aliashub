@@ -42,7 +42,11 @@ export function jsonRequest(app, pathname, options = {}) {
       finished = true;
       const text = Buffer.concat(chunks).toString("utf8");
       resolve({
-        response: { status: response.statusCode, ok: response.statusCode >= 200 && response.statusCode < 300 },
+        response: {
+          status: response.statusCode,
+          ok: response.statusCode >= 200 && response.statusCode < 300,
+          headers: response.getHeaders(),
+        },
         body: text ? JSON.parse(text) : {},
       });
     });

@@ -118,6 +118,21 @@ behind HTTPS and additional access control and set its browser-visible URL:
 REGISTRATION_BROWSER_URL=https://browser.example.com/vnc.html?autoconnect=true&resize=scale&path=websockify
 ```
 
+To reuse the AliasHub administrator session instead of prompting for separate
+browser credentials, proxy a same-origin path such as `/alias-hub/browser/` to
+`127.0.0.1:6080`. Protect that location with an Nginx `auth_request` subrequest
+to `/api/auth/check`, then configure:
+
+```dotenv
+REGISTRATION_BROWSER_URL=/alias-hub/browser/vnc.html?autoconnect=true&resize=scale&path=alias-hub/browser/websockify
+REGISTRATION_VNC_TRUST_PROXY=true
+```
+
+Only enable `REGISTRATION_VNC_TRUST_PROXY` while port 6080 remains bound to
+loopback and every externally reachable noVNC path is protected by the
+AliasHub session check. Otherwise keep it false and retain the separate VNC
+password.
+
 The host ports remain loopback-bound even after this setting changes. Configure
 the reverse proxy to forward to `127.0.0.1:6080`; do not change the Compose port
 binding to `0.0.0.0`.

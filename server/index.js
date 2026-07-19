@@ -363,6 +363,7 @@ export function createApp(options = {}) {
   app.get("/api/auth/status", auth.status);
   app.post("/api/auth/login", auth.login);
   app.post("/api/auth/logout", auth.logout);
+  app.get("/api/auth/check", auth.requireAdmin, (_req, res) => res.status(204).end());
 
   app.get("/api/extension/download", (_req, res, next) => {
     const archive = path.join(projectRoot, "release", "aliashub-outlook-extension.zip");

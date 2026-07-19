@@ -23,6 +23,7 @@ services:
       ACCOUNT_MANAGER_DATABASE_URL: sqlite:////app/data/account_manager.db
       APP_PASSWORD: "${REGISTRATION_SERVICE_TOKEN:?run ./scripts/setup-local.sh --full first}"
       VNC_PASSWORD: "${REGISTRATION_VNC_PASSWORD:?run ./scripts/setup-local.sh --full first}"
+      VNC_TRUST_PROXY: "${REGISTRATION_VNC_TRUST_PROXY:-false}"
     ports:
       - "127.0.0.1:${REGISTRATION_WORKER_PORT:-8000}:8000"
       - "127.0.0.1:${REGISTRATION_BROWSER_PORT:-6080}:6080"
