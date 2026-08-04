@@ -1670,9 +1670,6 @@ export class RegistrationService {
     const base = this.db.prepare("SELECT * FROM addresses WHERE id = ? AND account_id = ? AND kind IN ('primary', 'official') AND status = 'active'").get(Number(input.baseAddressId), account.id);
     if (!base) throw Object.assign(new Error("请选择可用的基础地址"), { status: 400 });
     const proxies = resolveJobProxies(input, this.getProxyPool());
-    const registrationSerialKey = account.provider === "icloud"
-      ? `icloud:${crypto.createHash("sha256").update(String(account.email || "").trim().toLowerCase()).digest("hex").slice(0, 24)}`
-      : "";
     const addresses = generateSplits(this.db, account, {
       baseAddressIds: [base.id],
       countPerBase: count,
@@ -1698,35 +1695,15 @@ export class RegistrationService {
       `).run(account.id, address.id, address.address, browserMode, maskProxy(proxy), crypto.randomUUID().slice(0, 12), now, now);
       const jobId = Number(result.lastInsertRowid);
       try {
-        const task = await this.client.createTask({
-          platform: "chatgpt",
+        const task = await this.client.createTask(this.registrationTaskPayload({
+          account,
           email: address.address,
-          password: requestedPassword || null,
-          count: 1,
-          concurrency: 1,
-          proxy: proxy || null,
-          executor_type: browserMode,
-          captcha_solver: "auto",
-          extra: {
-            identity_provider: "mailbox",
-            mail_provider: "outlook_email_api",
-            outlook_email_api_url: this.mailboxBaseUrl,
-            outlook_email_api_key: this.connectorKey,
-            outlook_email_fixed_email: address.address,
-            outlook_email_folder: "all",
-            outlook_email_top: "20",
-            outlook_email_poll_interval: "3",
-            fresh_browser_context: true,
-            random_fingerprint: true,
-            email_only_registration: true,
-            disable_phone_verification: true,
-            phone_verification_policy: "forbid",
-            allow_chatgpt_registration_proxy: true,
-            ...(registrationSerialKey ? { registration_serial_key: registrationSerialKey } : {}),
-            set_password_after_registration: setPasswordAfterRegistration,
-            auto_continue_post_signup: autoContinuePostSignup,
-          },
-        });
+          password: requestedPassword,
+          proxy,
+          browserMode,
+          setPasswordAfterRegistration,
+          autoContinuePostSignup,
+        }));
         const taskId = String(task.task_id || task.id || "");
         this.db.prepare("UPDATE registration_jobs SET external_task_id = ?, message = ?, updated_at = ? WHERE id = ?")
           .run(taskId, "任务已提交，等待执行", nowIso(), jobId);
@@ -1737,6 +1714,132 @@ export class RegistrationService {
       jobs.push(publicRegistrationJob(this.getJob(jobId)));
     }
     return jobs;
+  }
+
+  registrationTaskPayload({
+    account,
+    email,
+    password = "",
+    proxy = "",
+    browserMode = "headed",
+    setPasswordAfterRegistration = false,
+    autoContinuePostSignup = true,
+  }) {
+    const registrationSerialKey = account?.provider === "icloud"
+      ? `icloud:${crypto.createHash("sha256").update(String(account.email || "").trim().toLowerCase()).digest("hex").slice(0, 24)}`
+      : "";
+    return {
+      platform: "chatgpt",
+      email,
+      password: password || null,
+      count: 1,
+      concurrency: 1,
+      proxy: proxy || null,
+      executor_type: browserMode,
+      captcha_solver: "auto",
+      extra: {
+        identity_provider: "mailbox",
+        mail_provider: "outlook_email_api",
+        outlook_email_api_url: this.mailboxBaseUrl,
+        outlook_email_api_key: this.connectorKey,
+        outlook_email_fixed_email: email,
+        outlook_email_folder: "all",
+        outlook_email_top: "20",
+        outlook_email_poll_interval: "3",
+        fresh_browser_context: true,
+        random_fingerprint: true,
+        email_only_registration: true,
+        disable_phone_verification: true,
+        phone_verification_policy: "forbid",
+        allow_chatgpt_registration_proxy: true,
+        ...(registrationSerialKey ? { registration_serial_key: registrationSerialKey } : {}),
+        set_password_after_registration: setPasswordAfterRegistration,
+        auto_continue_post_signup: autoContinuePostSignup,
+      },
+    };
+  }
+
+  async retryJob(id) {
+    const original = this.db.prepare(`
+      SELECT registration_jobs.*, source_accounts.provider AS source_provider,
+        source_accounts.email AS source_email, source_accounts.status AS source_status,
+        addresses.address AS mapped_address, addresses.status AS address_status
+      FROM registration_jobs
+      LEFT JOIN source_accounts ON source_accounts.id = registration_jobs.account_id
+      LEFT JOIN addresses ON addresses.id = registration_jobs.address_id
+      WHERE registration_jobs.id = ? AND registration_jobs.deleted_at IS NULL
+    `).get(Number(id));
+    if (!original) throw Object.assign(new Error("注册任务不存在"), { status: 404 });
+    if (!new Set(["failed", "cancelled", "interrupted"]).has(String(original.status || ""))) {
+      throw Object.assign(new Error("只能重试失败、已取消或已中断的注册任务"), { status: 409 });
+    }
+    if (original.external_account_id) {
+      throw Object.assign(new Error("这个任务已经生成注册账号，不能重复注册"), { status: 409 });
+    }
+    if (original.source_status !== "connected" || !original.account_id) {
+      throw Object.assign(new Error("原源头邮箱当前未连接，不能重试"), { status: 409 });
+    }
+    if (original.address_status !== "active"
+      || String(original.mapped_address || "").toLowerCase() !== String(original.email || "").toLowerCase()) {
+      throw Object.assign(new Error("原注册邮箱别名已不存在或映射不一致，不能重试"), { status: 409 });
+    }
+    const duplicate = this.db.prepare(`
+      SELECT status FROM registration_jobs
+      WHERE id != ? AND email = ? COLLATE NOCASE AND deleted_at IS NULL
+        AND status IN ('queued', 'pending', 'claimed', 'running', 'cancel_requested', 'completed')
+      ORDER BY created_at DESC, id DESC LIMIT 1
+    `).get(original.id, original.email);
+    if (duplicate) {
+      const message = duplicate.status === "completed"
+        ? "这个邮箱别名已经注册成功，不能再次重试"
+        : "这个邮箱别名已经有进行中的重试任务";
+      throw Object.assign(new Error(message), { status: 409 });
+    }
+
+    const proxyLabel = String(original.proxy_label || "").trim();
+    let proxyTemplate = "";
+    if (proxyLabel && proxyLabel !== "直连") {
+      const matches = this.getProxyPool().filter((proxy) => maskProxy(proxy) === proxyLabel);
+      if (matches.length !== 1) {
+        throw Object.assign(new Error("无法唯一还原注册时使用的代理，不能重试"), { status: 409 });
+      }
+      [proxyTemplate] = matches;
+    }
+    const proxy = materializeProxySession(proxyTemplate, new Set());
+    const browserMode = new Set(["headed", "headless"]).has(original.browser_mode)
+      ? original.browser_mode : "headed";
+    const now = nowIso();
+    const result = this.db.prepare(`
+      INSERT INTO registration_jobs (
+        account_id, address_id, email, status, stage, browser_mode, proxy_label, fingerprint_id,
+        message, created_at, updated_at
+      ) VALUES (?, ?, ?, 'queued', 'queued', ?, ?, ?, '正在重新提交同一邮箱别名', ?, ?)
+    `).run(
+      original.account_id,
+      original.address_id,
+      original.email,
+      browserMode,
+      maskProxy(proxy),
+      crypto.randomUUID().slice(0, 12),
+      now,
+      now,
+    );
+    const jobId = Number(result.lastInsertRowid);
+    try {
+      const task = await this.client.createTask(this.registrationTaskPayload({
+        account: { provider: original.source_provider, email: original.source_email },
+        email: original.email,
+        proxy,
+        browserMode,
+      }));
+      const taskId = String(task.task_id || task.id || "");
+      this.db.prepare("UPDATE registration_jobs SET external_task_id = ?, message = ?, updated_at = ? WHERE id = ?")
+        .run(taskId, "同一邮箱别名重试已提交，等待执行", nowIso(), jobId);
+    } catch {
+      this.db.prepare("UPDATE registration_jobs SET status = 'failed', stage = 'submit', message = ?, finished_at = ?, updated_at = ? WHERE id = ?")
+        .run("同一邮箱别名重试提交失败", nowIso(), nowIso(), jobId);
+    }
+    return publicRegistrationJob(this.getJob(jobId));
   }
 
   getJob(id) {

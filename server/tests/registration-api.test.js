@@ -509,6 +509,69 @@ test("registration integration generates isolated addresses and exposes mailbox 
       assert.ok(response.body.items[0].fingerprint_id);
     });
 
+    await t.test("retries an interrupted registration with the exact same email alias", async () => {
+      const proxyTemplate = "http://kookeey-user:base-secret-TR-12345678-30m@gate-us.kookeey.info:1000";
+      const createdPayloadCount = client.created.length;
+      let retryEmail = "";
+      setSetting(db, "registration_proxy_pool", JSON.stringify([proxyTemplate]));
+      db.prepare("UPDATE source_accounts SET provider = 'icloud' WHERE id = ?").run(account.id);
+      try {
+        const created = await jsonRequest(runtime.app, "/api/registration/jobs", {
+          method: "POST",
+          body: JSON.stringify({
+            accountId: account.id,
+            baseAddressId: base.id,
+            count: 1,
+            suffix: "retry-same-alias",
+            browserMode: "headed",
+            proxySelection: "auto",
+          }),
+        });
+        assert.equal(created.response.status, 202);
+        const original = created.body.items[0];
+        retryEmail = original.email;
+        const originalPayload = client.created.at(-1);
+        db.prepare(`
+          UPDATE registration_jobs
+          SET status = 'interrupted', stage = 'released', message = '任务已中断', finished_at = ?, updated_at = ?
+          WHERE id = ?
+        `).run(nowIso(), nowIso(), original.id);
+
+        const retried = await jsonRequest(runtime.app, `/api/registration/jobs/${original.id}/retry`, {
+          method: "POST",
+        });
+        assert.equal(retried.response.status, 202);
+        assert.notEqual(retried.body.item.id, original.id);
+        assert.equal(retried.body.item.email, original.email);
+        assert.equal(retried.body.item.status, "queued");
+        assert.notEqual(retried.body.item.fingerprint_id, original.fingerprint_id);
+        assert.equal(db.prepare("SELECT status FROM registration_jobs WHERE id = ?").get(original.id).status, "interrupted");
+
+        const retryPayload = client.created.at(-1);
+        assert.equal(retryPayload.email, originalPayload.email);
+        assert.equal(retryPayload.executor_type, originalPayload.executor_type);
+        assert.equal(retryPayload.password, null);
+        assert.equal(retryPayload.extra.outlook_email_fixed_email, originalPayload.email);
+        assert.equal(retryPayload.extra.registration_serial_key, originalPayload.extra.registration_serial_key);
+        assert.notEqual(decodeURIComponent(new URL(retryPayload.proxy).password), decodeURIComponent(new URL(originalPayload.proxy).password));
+        assert.equal(retried.body.item.proxy_label, "http://***@gate-us.kookeey.info:1000");
+        assert.doesNotMatch(JSON.stringify(retried.body), /kookeey-user|base-secret|12345678/i);
+
+        const duplicate = await jsonRequest(runtime.app, `/api/registration/jobs/${original.id}/retry`, {
+          method: "POST",
+        });
+        assert.equal(duplicate.response.status, 409);
+        assert.equal(duplicate.body.error, "这个邮箱别名已经有进行中的重试任务");
+      } finally {
+        if (retryEmail) {
+          db.prepare("DELETE FROM registration_jobs WHERE email = ? COLLATE NOCASE").run(retryEmail);
+          db.prepare("DELETE FROM addresses WHERE address = ? COLLATE NOCASE AND kind = 'split'").run(retryEmail);
+        }
+        client.created.splice(createdPayloadCount);
+        db.prepare("UPDATE source_accounts SET provider = 'microsoft' WHERE id = ?").run(account.id);
+      }
+    });
+
     await t.test("does not persist or return a materialized proxy echoed by task submission", async () => {
       const createdBeforeFailure = client.created.length;
       client.createError = (payload) => new Error(`upstream rejected ${payload.proxy}`);

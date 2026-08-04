@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Ban, Cable, Check, CircleStop, ClipboardCopy, Copy, Database, Download, ExternalLink, Eye, EyeOff, Fingerprint, Globe2, KeyRound, ListChecks, LoaderCircle, Mail, Monitor, Network, Pencil, Play, RefreshCw, Save, ScrollText, Server, ShieldCheck, SlidersHorizontal, Trash2, UserPlus } from "lucide-react";
+import { AlertTriangle, Ban, Cable, Check, CircleStop, ClipboardCopy, Copy, Database, Download, ExternalLink, Eye, EyeOff, Fingerprint, Globe2, KeyRound, ListChecks, LoaderCircle, Mail, Monitor, Network, Pencil, Play, RefreshCw, RotateCcw, Save, ScrollText, Server, ShieldCheck, SlidersHorizontal, Trash2, UserPlus } from "lucide-react";
 import { api, appUrl } from "../api.js";
 import { Button, ConfirmDialog, EmptyState, FormField, IconButton, LoadingBlock, Modal, Segmented, StatusBadge, useToast } from "../components.jsx";
 import { copyText, formatDate, relativeTime } from "../utils.js";
@@ -506,11 +506,12 @@ function AccountSignalCell({ item, compact = false }) {
   return <div className={`registration-account-signal ${compact ? "compact" : ""}`} title={title}><div><StatusBadge status={meta.badge}>{meta.label}</StatusBadge><span className={`registration-account-type type-${type.type}`}>{type.label}</span></div><TrialEligibilityBadge item={item} /><small className={captionClass}>{checkCaption}</small>{sourceAndTime && <small className="check-meta">{sourceAndTime}</small>}</div>;
 }
 
-function JobCommands({ job, onLogs, onCancel, onRelease, onExport, onDelete, exporting }) {
+function JobCommands({ job, onLogs, onCancel, onRelease, onRetry, onExport, onDelete, exporting, retrying }) {
   const cancellable = job.status === "queued" || job.status === "running";
   const releasable = releasableStatuses.has(job.status);
+  const retryable = new Set(["failed", "cancelled", "interrupted"]).has(job.status);
   const exportable = job.status === "completed" && job.external_account_id;
-  return <div className="row-actions"><button className="registration-row-command" title="查看日志" onClick={() => onLogs(job)}><ScrollText size={15} /></button>{exportable && <button className="registration-row-command" disabled={exporting} title="导出这个账号的 AT 备份" onClick={() => onExport(job.external_account_id)}><Download size={15} /></button>}{cancellable && <button className="registration-row-command danger" title="请求取消任务" onClick={() => onCancel(job.id)}><Ban size={15} /></button>}{releasable && <button className="registration-row-command warning" title="强制释放任务" onClick={() => onRelease(job)}><CircleStop size={15} /></button>}{deletableStatuses.has(job.status) && <button className="registration-row-command danger" title="删除注册记录" onClick={() => onDelete(job)}><Trash2 size={15} /></button>}</div>;
+  return <div className="row-actions"><button className="registration-row-command" title="查看日志" onClick={() => onLogs(job)}><ScrollText size={15} /></button>{retryable && <button className="registration-row-command" disabled={retrying} title="使用同一邮箱别名重新注册" onClick={() => onRetry(job)}>{retrying ? <LoaderCircle className="spin" size={15} /> : <RotateCcw size={15} />}</button>}{exportable && <button className="registration-row-command" disabled={exporting} title="导出这个账号的 AT 备份" onClick={() => onExport(job.external_account_id)}><Download size={15} /></button>}{cancellable && <button className="registration-row-command danger" title="请求取消任务" onClick={() => onCancel(job.id)}><Ban size={15} /></button>}{releasable && <button className="registration-row-command warning" title="强制释放任务" onClick={() => onRelease(job)}><CircleStop size={15} /></button>}{deletableStatuses.has(job.status) && <button className="registration-row-command danger" title="删除注册记录" onClick={() => onDelete(job)}><Trash2 size={15} /></button>}</div>;
 }
 
 function OAuthMailboxPanel({ email, data, loading, error, updatedAt, onRefresh, onClose, onCopyCode }) {
@@ -564,6 +565,7 @@ export default function RegistrationPage({ refreshKey }) {
   const [deleting, setDeleting] = useState(false);
   const [releaseTarget, setReleaseTarget] = useState(null);
   const [releasing, setReleasing] = useState(false);
+  const [retryingJobId, setRetryingJobId] = useState(null);
   const [selectedJobIds, setSelectedJobIds] = useState([]);
   const [selectedAccountIds, setSelectedAccountIds] = useState([]);
   const [copyingTokenId, setCopyingTokenId] = useState(null);
@@ -844,6 +846,19 @@ export default function RegistrationPage({ refreshKey }) {
   const cancel = async (id) => {
     try { await api(`/api/registration/jobs/${id}/cancel`, { method: "POST" }); toast("注册任务已取消"); await loadJobs(); }
     catch (error) { toast(error.message, "error"); }
+  };
+
+  const retryJob = async (job) => {
+    setRetryingJobId(job.id);
+    try {
+      await api(`/api/registration/jobs/${job.id}/retry`, { method: "POST" });
+      toast(`${job.email} 已使用同一邮箱别名重新提交`);
+      await loadJobs();
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      setRetryingJobId(null);
+    }
   };
 
   const releaseJob = async () => {
@@ -1510,13 +1525,13 @@ export default function RegistrationPage({ refreshKey }) {
               const selectable = deletableStatuses.has(job.status);
               const checked = selectedJobIds.includes(job.id);
               const registeredAccount = registeredAccountById.get(String(job.external_account_id || ""));
-              return <tr className={checked ? "selected-row" : ""} key={job.id}><td className="select-column"><input type="checkbox" aria-label={`选择 ${job.email}`} checked={checked} disabled={!selectable} onChange={() => toggleJob(job.id)} /></td><td><button className="registration-email-button" onClick={() => copyText(job.email).then(() => toast("邮箱已复制"))}>{job.email}<Copy size={13} /></button><small className="registration-source">{job.source_email || "源邮箱已删除"}</small></td><td><div className="registration-identity"><b>{job.display_name || "等待生成"}</b><small>{job.birth_date ? `${job.birth_date} · ${ageFromBirth(job.birth_date)} 岁` : "姓名和年龄自动随机"}</small></div></td><td><code className="fingerprint-code">{job.fingerprint_id}</code><small className="registration-source">{job.browser_mode === "headed" ? "内嵌 Camoufox" : "后台 Camoufox"}</small></td><td><div className="registration-identity"><b>{job.proxy_label}</b><small>{job.exit_ip ? `出口 ${job.exit_ip}` : "等待识别出口 IP"}</small></div></td><td><div className="registration-status"><StatusBadge status={job.status}>{jobStatusLabel(job)}</StatusBadge>{registeredAccount && <TrialEligibilityBadge item={registeredAccount} />}{job.failure_reason === "user_already_exists" && <small>建议更换基础地址</small>}</div></td><td><span className="muted-cell">{formatDate(job.created_at)}</span></td><td><JobCommands job={job} exporting={exportingTokenBackup} onLogs={openLogs} onExport={(id) => exportTokenBackup([id])} onCancel={cancel} onRelease={setReleaseTarget} onDelete={(item) => setDeleteTarget({ kind: "job", ids: [item.id], item })} /></td></tr>;
+              return <tr className={checked ? "selected-row" : ""} key={job.id}><td className="select-column"><input type="checkbox" aria-label={`选择 ${job.email}`} checked={checked} disabled={!selectable} onChange={() => toggleJob(job.id)} /></td><td><button className="registration-email-button" onClick={() => copyText(job.email).then(() => toast("邮箱已复制"))}>{job.email}<Copy size={13} /></button><small className="registration-source">{job.source_email || "源邮箱已删除"}</small></td><td><div className="registration-identity"><b>{job.display_name || "等待生成"}</b><small>{job.birth_date ? `${job.birth_date} · ${ageFromBirth(job.birth_date)} 岁` : "姓名和年龄自动随机"}</small></div></td><td><code className="fingerprint-code">{job.fingerprint_id}</code><small className="registration-source">{job.browser_mode === "headed" ? "内嵌 Camoufox" : "后台 Camoufox"}</small></td><td><div className="registration-identity"><b>{job.proxy_label}</b><small>{job.exit_ip ? `出口 ${job.exit_ip}` : "等待识别出口 IP"}</small></div></td><td><div className="registration-status"><StatusBadge status={job.status}>{jobStatusLabel(job)}</StatusBadge>{registeredAccount && <TrialEligibilityBadge item={registeredAccount} />}{job.failure_reason === "user_already_exists" && <small>建议更换基础地址</small>}</div></td><td><span className="muted-cell">{formatDate(job.created_at)}</span></td><td><JobCommands job={job} exporting={exportingTokenBackup} retrying={retryingJobId === job.id} onLogs={openLogs} onRetry={retryJob} onExport={(id) => exportTokenBackup([id])} onCancel={cancel} onRelease={setReleaseTarget} onDelete={(item) => setDeleteTarget({ kind: "job", ids: [item.id], item })} /></td></tr>;
             })}</tbody></table></div>
             <div className="registration-mobile-list">{jobs.map((job) => {
               const selectable = deletableStatuses.has(job.status);
               const checked = selectedJobIds.includes(job.id);
               const registeredAccount = registeredAccountById.get(String(job.external_account_id || ""));
-              return <article className={checked ? "selected" : ""} key={job.id}><header><input type="checkbox" aria-label={`选择 ${job.email}`} checked={checked} disabled={!selectable} onChange={() => toggleJob(job.id)} /><StatusBadge status={job.status}>{jobStatusLabel(job)}</StatusBadge><time>{formatDate(job.created_at)}</time></header><button onClick={() => copyText(job.email).then(() => toast("邮箱已复制"))}>{job.email}<Copy size={14} /></button>{registeredAccount && <TrialEligibilityBadge item={registeredAccount} />}<dl><div><dt>身份</dt><dd>{job.display_name || "等待生成"}</dd></div><div><dt>出口 IP</dt><dd>{job.exit_ip || "等待识别"}</dd></div><div><dt>代理</dt><dd>{job.proxy_label}</dd></div></dl><footer><span>{job.display_message || job.message || "-"}</span><JobCommands job={job} exporting={exportingTokenBackup} onLogs={openLogs} onExport={(id) => exportTokenBackup([id])} onCancel={cancel} onRelease={setReleaseTarget} onDelete={(item) => setDeleteTarget({ kind: "job", ids: [item.id], item })} /></footer></article>;
+              return <article className={checked ? "selected" : ""} key={job.id}><header><input type="checkbox" aria-label={`选择 ${job.email}`} checked={checked} disabled={!selectable} onChange={() => toggleJob(job.id)} /><StatusBadge status={job.status}>{jobStatusLabel(job)}</StatusBadge><time>{formatDate(job.created_at)}</time></header><button onClick={() => copyText(job.email).then(() => toast("邮箱已复制"))}>{job.email}<Copy size={14} /></button>{registeredAccount && <TrialEligibilityBadge item={registeredAccount} />}<dl><div><dt>身份</dt><dd>{job.display_name || "等待生成"}</dd></div><div><dt>出口 IP</dt><dd>{job.exit_ip || "等待识别"}</dd></div><div><dt>代理</dt><dd>{job.proxy_label}</dd></div></dl><footer><span>{job.display_message || job.message || "-"}</span><JobCommands job={job} exporting={exportingTokenBackup} retrying={retryingJobId === job.id} onLogs={openLogs} onRetry={retryJob} onExport={(id) => exportTokenBackup([id])} onCancel={cancel} onRelease={setReleaseTarget} onDelete={(item) => setDeleteTarget({ kind: "job", ids: [item.id], item })} /></footer></article>;
             })}</div>
             <div className="table-footer"><span>共 {jobs.length} 个注册任务</span></div>
           </> : <EmptyState icon={UserPlus} title="还没有注册任务" description="选择源头邮箱和基础地址后开始注册。" />}

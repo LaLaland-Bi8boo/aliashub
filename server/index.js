@@ -424,6 +424,9 @@ export function createApp(options = {}) {
   app.get("/api/registration/jobs", async (req, res, next) => {
     try { res.json({ items: await registration.listJobs(req.query) }); } catch (error) { next(error); }
   });
+  app.post("/api/registration/jobs/:id/retry", async (req, res, next) => {
+    try { res.status(202).json({ item: await registration.retryJob(req.params.id) }); } catch (error) { next(error); }
+  });
   app.post("/api/registration/jobs/:id/cancel", async (req, res, next) => {
     try { res.json({ item: await registration.cancelJob(req.params.id) }); } catch (error) { next(error); }
   });
