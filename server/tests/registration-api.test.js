@@ -511,9 +511,10 @@ test("registration integration generates isolated addresses and exposes mailbox 
 
     await t.test("retries an interrupted registration with the exact same email alias", async () => {
       const proxyTemplate = "http://kookeey-user:base-secret-TR-12345678-30m@gate-us.kookeey.info:1000";
+      const alternateProxy = "http://retry-user:retry-secret-TR-87654321-30m@gate-us.kookeey.info:1000";
       const createdPayloadCount = client.created.length;
       let retryEmail = "";
-      setSetting(db, "registration_proxy_pool", JSON.stringify([proxyTemplate]));
+      setSetting(db, "registration_proxy_pool", JSON.stringify([proxyTemplate, alternateProxy]));
       db.prepare("UPDATE source_accounts SET provider = 'icloud' WHERE id = ?").run(account.id);
       try {
         const created = await jsonRequest(runtime.app, "/api/registration/jobs", {
@@ -553,9 +554,11 @@ test("registration integration generates isolated addresses and exposes mailbox 
         assert.equal(retryPayload.password, null);
         assert.equal(retryPayload.extra.outlook_email_fixed_email, originalPayload.email);
         assert.equal(retryPayload.extra.registration_serial_key, originalPayload.extra.registration_serial_key);
+        assert.equal(new URL(originalPayload.proxy).username, "kookeey-user");
+        assert.equal(new URL(retryPayload.proxy).username, "retry-user");
         assert.notEqual(decodeURIComponent(new URL(retryPayload.proxy).password), decodeURIComponent(new URL(originalPayload.proxy).password));
         assert.equal(retried.body.item.proxy_label, "http://***@gate-us.kookeey.info:1000");
-        assert.doesNotMatch(JSON.stringify(retried.body), /kookeey-user|base-secret|12345678/i);
+        assert.doesNotMatch(JSON.stringify(retried.body), /kookeey-user|retry-user|base-secret|retry-secret|12345678|87654321/i);
 
         const duplicate = await jsonRequest(runtime.app, `/api/registration/jobs/${original.id}/retry`, {
           method: "POST",

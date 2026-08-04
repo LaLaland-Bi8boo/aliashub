@@ -1800,10 +1800,14 @@ export class RegistrationService {
     let proxyTemplate = "";
     if (proxyLabel && proxyLabel !== "直连") {
       const matches = this.getProxyPool().filter((proxy) => maskProxy(proxy) === proxyLabel);
-      if (matches.length !== 1) {
-        throw Object.assign(new Error("无法唯一还原注册时使用的代理，不能重试"), { status: 409 });
+      if (!matches.length) {
+        throw Object.assign(new Error("代理池中已找不到注册时使用的代理地址，不能重试"), { status: 409 });
       }
-      [proxyTemplate] = matches;
+      const previousAttempts = this.db.prepare(`
+        SELECT COUNT(*) AS count FROM registration_jobs
+        WHERE email = ? COLLATE NOCASE AND deleted_at IS NULL
+      `).get(original.email).count;
+      proxyTemplate = matches[previousAttempts % matches.length];
     }
     const proxy = materializeProxySession(proxyTemplate, new Set());
     const browserMode = new Set(["headed", "headless"]).has(original.browser_mode)
