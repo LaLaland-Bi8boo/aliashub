@@ -9447,20 +9447,15 @@ def _open_url_system_browser(url: str) -> bool:
     return False
 
 
-def _stripe_init_long_url(
+def _stripe_init_checkout_data(
     cs_id: str,
     publishable_key: str,
     *,
     payment_locale: str = "en",
     user_agent: str = "",
     proxy: Optional[str] = None,
-) -> str:
-    """用 Stripe ``payment_pages/{cs}/init`` 把 checkout_session 实体化成长链。
-
-    移植自 oaipayy/server.py 的 step2/step3：POST Stripe init 拿
-    ``stripe_hosted_url``（``checkout.stripe.com/c/pay/cs_...``），再把 host
-    重写成 ``pay.openai.com`` 返回最终 cashier_url。失败抛 ValueError。
-    """
+) -> dict[str, Any]:
+    """读取 Stripe ``payment_pages/{cs}/init`` 的完整结账会话。"""
     pk = str(publishable_key or "").strip() or DEFAULT_STRIPE_PK
     stripe_js_id = str(uuid.uuid4())
     body = {
@@ -9494,8 +9489,30 @@ def _stripe_init_long_url(
     if resp.status_code != 200:
         raise ValueError(f"Stripe init 失败 HTTP {resp.status_code}: {resp.text[:300]}")
     data = resp.json() if callable(getattr(resp, "json", None)) else {}
-    if not isinstance(data, dict):
-        data = {}
+    return data if isinstance(data, dict) else {}
+
+
+def _stripe_init_long_url(
+    cs_id: str,
+    publishable_key: str,
+    *,
+    payment_locale: str = "en",
+    user_agent: str = "",
+    proxy: Optional[str] = None,
+) -> str:
+    """用 Stripe ``payment_pages/{cs}/init`` 把 checkout_session 实体化成长链。
+
+    移植自 oaipayy/server.py 的 step2/step3：POST Stripe init 拿
+    ``stripe_hosted_url``（``checkout.stripe.com/c/pay/cs_...``），再把 host
+    重写成 ``pay.openai.com`` 返回最终 cashier_url。失败抛 ValueError。
+    """
+    data = _stripe_init_checkout_data(
+        cs_id,
+        publishable_key,
+        payment_locale=payment_locale,
+        user_agent=user_agent,
+        proxy=proxy,
+    )
     hosted = (
         str(data.get("stripe_hosted_url") or "").strip()
         or str(data.get("hosted_url") or "").strip()
@@ -9507,6 +9524,41 @@ def _stripe_init_long_url(
         # host 不是预期的 checkout.stripe.com，不重写，原样返回（仍可用）
         return hosted
     return hosted.replace("checkout.stripe.com", "pay.openai.com")
+
+
+def check_plus_trial_eligibility(
+    account: Account,
+    proxy: Optional[str] = None,
+    country: str = "US",
+) -> dict[str, Any]:
+    """只读检测 OpenAI 官方 Plus 一个月免费试用资格，不提交付款。"""
+    from .stripe_http import extract_checkout_session_id, extract_confirm_expected_amounts
+
+    checkout_url = generate_plus_link(account, proxy=proxy, country=country)
+    cs_id = extract_checkout_session_id(checkout_url)
+    init_data = _stripe_init_checkout_data(cs_id, "", proxy=proxy)
+    expected, expected_on_bca = extract_confirm_expected_amounts(init_data)
+    amount_fields_present = any((
+        isinstance(init_data.get("elements_options"), dict)
+        and init_data["elements_options"].get("amount") is not None,
+        isinstance(init_data.get("total_summary"), dict)
+        and init_data["total_summary"].get("due") is not None,
+        isinstance(init_data.get("invoice"), dict)
+        and init_data["invoice"].get("amount_due") is not None,
+    ))
+    if not amount_fields_present:
+        raise ValueError("官方结账响应未返回今日应付金额")
+    due_minor = int(expected)
+    future_minor = int(expected_on_bca or 0)
+    eligible = due_minor == 0 and future_minor > 0
+    return {
+        "eligibility": "eligible" if eligible else "ineligible",
+        "eligible": eligible,
+        "trial_days": 30 if eligible else 0,
+        "amount_due_minor": due_minor,
+        "future_amount_minor": future_minor,
+        "source": "openai-checkout/plus-1-month-free",
+    }
 
 
 def generate_plus_link(

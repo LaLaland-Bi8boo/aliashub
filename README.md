@@ -14,10 +14,14 @@ the upstream copyright notices and is distributed under the same
 The extended version adds and refines:
 
 - Xunmail credential import and Graph mailbox access;
+- iCloud mailbox-link import, serialized `+tag` registration, and selected
+  alias-to-mailbox TXT export;
 - Camoufox-based registration and reusable authenticated noVNC sessions;
 - separation between the registration browser proxy and direct internal
   AliasHub mailbox traffic;
 - reliable verification-code extraction from plain-text and HTML email;
+- encrypted local AT backups plus official one-month Plus trial eligibility
+  labels for registered accounts;
 - Xunmail delivery fallback when the upstream mail response omits recipient
   metadata.
 

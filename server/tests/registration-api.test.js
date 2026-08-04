@@ -460,6 +460,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
     await t.test("creates one fresh-browser task per generated split address", async () => {
       const normalizedTemplate = "http://kookeey-user:base-secret-TR-12345678-30m@gate-us.kookeey.info:1000";
       setSetting(db, "registration_proxy_pool", JSON.stringify([normalizedTemplate]));
+      db.prepare("UPDATE source_accounts SET provider = 'icloud' WHERE id = ?").run(account.id);
       const response = await jsonRequest(runtime.app, "/api/registration/jobs", {
         method: "POST",
         body: JSON.stringify({
@@ -470,6 +471,7 @@ test("registration integration generates isolated addresses and exposes mailbox 
           proxySelection: "auto",
         }),
       });
+      db.prepare("UPDATE source_accounts SET provider = 'microsoft' WHERE id = ?").run(account.id);
       assert.equal(response.response.status, 202);
       assert.equal(response.body.items.length, 2);
       assert.equal(client.created.length, 2);
@@ -496,6 +498,8 @@ test("registration integration generates isolated addresses and exposes mailbox 
       assert.equal(client.created[0].extra.disable_phone_verification, true);
       assert.equal(client.created[0].extra.phone_verification_policy, "forbid");
       assert.equal(client.created[0].extra.allow_chatgpt_registration_proxy, true);
+      assert.match(client.created[0].extra.registration_serial_key, /^icloud:[a-f0-9]{24}$/);
+      assert.equal(client.created[1].extra.registration_serial_key, client.created[0].extra.registration_serial_key);
       assert.equal(client.created[0].extra.set_password_after_registration, false);
       assert.equal(client.created[0].extra.auto_continue_post_signup, true);
       assert.equal(response.body.items[0].proxy_label, "http://***@gate-us.kookeey.info:1000");

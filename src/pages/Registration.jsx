@@ -336,6 +336,17 @@ function AccessTokenCell({ available, loading, onCopy }) {
   return <div className="registration-secret"><code>{available ? "••••••••••••" : "未获取"}</code><button disabled={!available || loading} title={available ? "复制 AccessToken (AT)" : "尚未获取 AT"} onClick={onCopy}>{loading ? <LoaderCircle className="spin" size={14} /> : <KeyRound size={14} />}</button></div>;
 }
 
+function TrialEligibilityBadge({ item }) {
+  const eligibility = accountSignalText(item, ["plus_trial_eligibility", "plusTrialEligibility"], 30).toLowerCase();
+  const checkedAt = accountSignalText(item, ["plus_trial_checked_at", "plusTrialCheckedAt"], 80);
+  const reason = accountSignalText(item, ["plus_trial_reason", "plusTrialReason"], 160);
+  const accountType = accountTypeMeta(item).type;
+  if (accountType === "trial") return <span className="trial-eligibility eligible" title="账号当前处于 Trial 套餐"><Check size={11} />试用中</span>;
+  if (eligibility === "eligible") return <span className="trial-eligibility eligible" title={[reason, checkedAt && `检测于 ${formatDate(checkedAt)}`].filter(Boolean).join(" · ")}><Check size={11} />1 个月免费试用</span>;
+  if (eligibility === "ineligible") return <span className="trial-eligibility ineligible" title={[reason, checkedAt && `检测于 ${formatDate(checkedAt)}`].filter(Boolean).join(" · ")}>无 1 个月试用</span>;
+  return <span className="trial-eligibility pending" title={reason || "刷新账号状态后检测官方免费试用资格"}>试用资格待检测</span>;
+}
+
 function accountSignalValue(item, keys) {
   const containers = [item, item?.overview, item?.status_details, item?.statusDetails]
     .filter((value) => value && typeof value === "object" && !Array.isArray(value));
@@ -492,13 +503,14 @@ function AccountSignalCell({ item, compact = false }) {
     confirmedAt && confirmedAt !== checkedAt && `确认时间=${accountSignalTime(confirmedAt)}`,
   ].filter(Boolean).join(" · ");
   const captionClass = transient ? "check-failed" : availability === "unavailable" ? "check-invalid" : detail ? "check-detail" : "";
-  return <div className={`registration-account-signal ${compact ? "compact" : ""}`} title={title}><div><StatusBadge status={meta.badge}>{meta.label}</StatusBadge><span className={`registration-account-type type-${type.type}`}>{type.label}</span></div><small className={captionClass}>{checkCaption}</small>{sourceAndTime && <small className="check-meta">{sourceAndTime}</small>}</div>;
+  return <div className={`registration-account-signal ${compact ? "compact" : ""}`} title={title}><div><StatusBadge status={meta.badge}>{meta.label}</StatusBadge><span className={`registration-account-type type-${type.type}`}>{type.label}</span></div><TrialEligibilityBadge item={item} /><small className={captionClass}>{checkCaption}</small>{sourceAndTime && <small className="check-meta">{sourceAndTime}</small>}</div>;
 }
 
-function JobCommands({ job, onLogs, onCancel, onRelease, onDelete }) {
+function JobCommands({ job, onLogs, onCancel, onRelease, onExport, onDelete, exporting }) {
   const cancellable = job.status === "queued" || job.status === "running";
   const releasable = releasableStatuses.has(job.status);
-  return <div className="row-actions"><button className="registration-row-command" title="查看日志" onClick={() => onLogs(job)}><ScrollText size={15} /></button>{cancellable && <button className="registration-row-command danger" title="请求取消任务" onClick={() => onCancel(job.id)}><Ban size={15} /></button>}{releasable && <button className="registration-row-command warning" title="强制释放任务" onClick={() => onRelease(job)}><CircleStop size={15} /></button>}{deletableStatuses.has(job.status) && <button className="registration-row-command danger" title="删除注册记录" onClick={() => onDelete(job)}><Trash2 size={15} /></button>}</div>;
+  const exportable = job.status === "completed" && job.external_account_id;
+  return <div className="row-actions"><button className="registration-row-command" title="查看日志" onClick={() => onLogs(job)}><ScrollText size={15} /></button>{exportable && <button className="registration-row-command" disabled={exporting} title="导出这个账号的 AT 备份" onClick={() => onExport(job.external_account_id)}><Download size={15} /></button>}{cancellable && <button className="registration-row-command danger" title="请求取消任务" onClick={() => onCancel(job.id)}><Ban size={15} /></button>}{releasable && <button className="registration-row-command warning" title="强制释放任务" onClick={() => onRelease(job)}><CircleStop size={15} /></button>}{deletableStatuses.has(job.status) && <button className="registration-row-command danger" title="删除注册记录" onClick={() => onDelete(job)}><Trash2 size={15} /></button>}</div>;
 }
 
 function OAuthMailboxPanel({ email, data, loading, error, updatedAt, onRefresh, onClose, onCopyCode }) {
@@ -557,6 +569,7 @@ export default function RegistrationPage({ refreshKey }) {
   const [copyingTokenId, setCopyingTokenId] = useState(null);
   const [copyingSelectedTokens, setCopyingSelectedTokens] = useState(false);
   const [exportingTokenBackup, setExportingTokenBackup] = useState(false);
+  const [exportingMailboxLinks, setExportingMailboxLinks] = useState(false);
   const [checkingAccountSignals, setCheckingAccountSignals] = useState(false);
   const accountSignalRefreshBusy = useRef(false);
   const lastFocusedAccountRefreshAt = useRef(0);
@@ -719,6 +732,12 @@ export default function RegistrationPage({ refreshKey }) {
   const activeJobs = jobs?.filter((item) => releasableStatuses.has(item.status)).length || 0;
   const deletableJobIds = jobs?.filter((item) => deletableStatuses.has(item.status)).map((item) => item.id) || [];
   const allJobsSelected = deletableJobIds.length > 0 && deletableJobIds.every((id) => selectedJobIds.includes(id));
+  const selectedJobAccountIds = useMemo(() => [...new Set((jobs || [])
+    .filter((item) => selectedJobIds.includes(item.id) && item.status === "completed" && item.external_account_id)
+    .map((item) => Number(item.external_account_id))
+    .filter((id) => Number.isSafeInteger(id) && id > 0))], [jobs, selectedJobIds]);
+  const registeredAccountById = useMemo(() => new Map((accounts?.items || [])
+    .map((item) => [String(item.id), item])), [accounts]);
   const accountGroups = useMemo(() => {
     const groups = new Map();
     for (const item of accounts?.items || []) {
@@ -1316,10 +1335,14 @@ export default function RegistrationPage({ refreshKey }) {
     }
   };
 
-  const exportTokenBackup = async () => {
+  const exportTokenBackup = async (accountIds = []) => {
+    const selectedIds = Array.isArray(accountIds)
+      ? [...new Set(accountIds.map(Number).filter((id) => Number.isSafeInteger(id) && id > 0))]
+      : [];
     setExportingTokenBackup(true);
     try {
-      const response = await fetch(appUrl("/api/registration/accounts/token-backup"), {
+      const query = selectedIds.length ? `?ids=${encodeURIComponent(selectedIds.join(","))}` : "";
+      const response = await fetch(appUrl(`/api/registration/accounts/token-backup${query}`), {
         credentials: "same-origin",
         headers: { Accept: "application/json" },
       });
@@ -1336,11 +1359,46 @@ export default function RegistrationPage({ refreshKey }) {
       anchor.click();
       anchor.remove();
       URL.revokeObjectURL(url);
-      toast("AT 备份已下载到本地");
+      toast(selectedIds.length ? `已导出 ${selectedIds.length} 个账号的 AT 备份` : "AT 备份已下载到本地");
     } catch (error) {
       toast(error.message, "error");
     } finally {
       setExportingTokenBackup(false);
+    }
+  };
+
+  const exportSelectedMailboxLinks = async () => {
+    if (!selectedAccountIds.length) return;
+    setExportingMailboxLinks(true);
+    try {
+      const response = await fetch(appUrl("/api/registration/accounts/mailbox-links"), {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { Accept: "text/plain", "Content-Type": "application/json" },
+        body: JSON.stringify({ ids: selectedAccountIds }),
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || "iCloud 别名取件地址导出失败");
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `aliashub-icloud-mailboxes-${new Date().toISOString().slice(0, 10)}.txt`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      const exported = Number(response.headers.get("X-AliasHub-Exported")) || 0;
+      const skipped = Number(response.headers.get("X-AliasHub-Skipped")) || 0;
+      toast(skipped
+        ? `已导出 ${exported} 个 iCloud 账号，跳过 ${skipped} 个非 iCloud 或无取件地址账号`
+        : `已导出 ${exported} 个 iCloud 别名取件地址`);
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      setExportingMailboxLinks(false);
     }
   };
 
@@ -1445,17 +1503,20 @@ export default function RegistrationPage({ refreshKey }) {
             <div className="registration-bulk-bar">
               <label><input type="checkbox" checked={allJobsSelected} disabled={!deletableJobIds.length} onChange={toggleAllJobs} />全选可删除记录</label>
               <span>已选择 <b>{selectedJobIds.length}</b> 条</span>
+              <Button size="sm" icon={Download} loading={exportingTokenBackup} disabled={!selectedJobAccountIds.length} title={selectedJobAccountIds.length ? `导出所选记录中的 ${selectedJobAccountIds.length} 个成功账号` : "请先选择注册成功的记录"} onClick={() => exportTokenBackup(selectedJobAccountIds)}>导出所选 AT</Button>
               <Button size="sm" variant="danger" icon={Trash2} disabled={!selectedJobIds.length} onClick={() => setDeleteTarget({ kind: "jobs", ids: selectedJobIds })}>删除所选</Button>
             </div>
             <div className="data-table-wrap"><table className="data-table"><thead><tr><th className="select-column"><input type="checkbox" aria-label="选择全部可删除注册记录" checked={allJobsSelected} disabled={!deletableJobIds.length} onChange={toggleAllJobs} /></th><th>注册邮箱</th><th>随机身份</th><th>指纹会话</th><th>代理 / 出口 IP</th><th>状态</th><th>创建时间</th><th aria-label="操作" /></tr></thead><tbody>{jobs.map((job) => {
               const selectable = deletableStatuses.has(job.status);
               const checked = selectedJobIds.includes(job.id);
-              return <tr className={checked ? "selected-row" : ""} key={job.id}><td className="select-column"><input type="checkbox" aria-label={`选择 ${job.email}`} checked={checked} disabled={!selectable} onChange={() => toggleJob(job.id)} /></td><td><button className="registration-email-button" onClick={() => copyText(job.email).then(() => toast("邮箱已复制"))}>{job.email}<Copy size={13} /></button><small className="registration-source">{job.source_email || "源邮箱已删除"}</small></td><td><div className="registration-identity"><b>{job.display_name || "等待生成"}</b><small>{job.birth_date ? `${job.birth_date} · ${ageFromBirth(job.birth_date)} 岁` : "姓名和年龄自动随机"}</small></div></td><td><code className="fingerprint-code">{job.fingerprint_id}</code><small className="registration-source">{job.browser_mode === "headed" ? "内嵌 Camoufox" : "后台 Camoufox"}</small></td><td><div className="registration-identity"><b>{job.proxy_label}</b><small>{job.exit_ip ? `出口 ${job.exit_ip}` : "等待识别出口 IP"}</small></div></td><td><div className="registration-status"><StatusBadge status={job.status}>{jobStatusLabel(job)}</StatusBadge>{job.failure_reason === "user_already_exists" && <small>建议更换基础地址</small>}</div></td><td><span className="muted-cell">{formatDate(job.created_at)}</span></td><td><JobCommands job={job} onLogs={openLogs} onCancel={cancel} onRelease={setReleaseTarget} onDelete={(item) => setDeleteTarget({ kind: "job", ids: [item.id], item })} /></td></tr>;
+              const registeredAccount = registeredAccountById.get(String(job.external_account_id || ""));
+              return <tr className={checked ? "selected-row" : ""} key={job.id}><td className="select-column"><input type="checkbox" aria-label={`选择 ${job.email}`} checked={checked} disabled={!selectable} onChange={() => toggleJob(job.id)} /></td><td><button className="registration-email-button" onClick={() => copyText(job.email).then(() => toast("邮箱已复制"))}>{job.email}<Copy size={13} /></button><small className="registration-source">{job.source_email || "源邮箱已删除"}</small></td><td><div className="registration-identity"><b>{job.display_name || "等待生成"}</b><small>{job.birth_date ? `${job.birth_date} · ${ageFromBirth(job.birth_date)} 岁` : "姓名和年龄自动随机"}</small></div></td><td><code className="fingerprint-code">{job.fingerprint_id}</code><small className="registration-source">{job.browser_mode === "headed" ? "内嵌 Camoufox" : "后台 Camoufox"}</small></td><td><div className="registration-identity"><b>{job.proxy_label}</b><small>{job.exit_ip ? `出口 ${job.exit_ip}` : "等待识别出口 IP"}</small></div></td><td><div className="registration-status"><StatusBadge status={job.status}>{jobStatusLabel(job)}</StatusBadge>{registeredAccount && <TrialEligibilityBadge item={registeredAccount} />}{job.failure_reason === "user_already_exists" && <small>建议更换基础地址</small>}</div></td><td><span className="muted-cell">{formatDate(job.created_at)}</span></td><td><JobCommands job={job} exporting={exportingTokenBackup} onLogs={openLogs} onExport={(id) => exportTokenBackup([id])} onCancel={cancel} onRelease={setReleaseTarget} onDelete={(item) => setDeleteTarget({ kind: "job", ids: [item.id], item })} /></td></tr>;
             })}</tbody></table></div>
             <div className="registration-mobile-list">{jobs.map((job) => {
               const selectable = deletableStatuses.has(job.status);
               const checked = selectedJobIds.includes(job.id);
-              return <article className={checked ? "selected" : ""} key={job.id}><header><input type="checkbox" aria-label={`选择 ${job.email}`} checked={checked} disabled={!selectable} onChange={() => toggleJob(job.id)} /><StatusBadge status={job.status}>{jobStatusLabel(job)}</StatusBadge><time>{formatDate(job.created_at)}</time></header><button onClick={() => copyText(job.email).then(() => toast("邮箱已复制"))}>{job.email}<Copy size={14} /></button><dl><div><dt>身份</dt><dd>{job.display_name || "等待生成"}</dd></div><div><dt>出口 IP</dt><dd>{job.exit_ip || "等待识别"}</dd></div><div><dt>代理</dt><dd>{job.proxy_label}</dd></div></dl><footer><span>{job.display_message || job.message || "-"}</span><JobCommands job={job} onLogs={openLogs} onCancel={cancel} onRelease={setReleaseTarget} onDelete={(item) => setDeleteTarget({ kind: "job", ids: [item.id], item })} /></footer></article>;
+              const registeredAccount = registeredAccountById.get(String(job.external_account_id || ""));
+              return <article className={checked ? "selected" : ""} key={job.id}><header><input type="checkbox" aria-label={`选择 ${job.email}`} checked={checked} disabled={!selectable} onChange={() => toggleJob(job.id)} /><StatusBadge status={job.status}>{jobStatusLabel(job)}</StatusBadge><time>{formatDate(job.created_at)}</time></header><button onClick={() => copyText(job.email).then(() => toast("邮箱已复制"))}>{job.email}<Copy size={14} /></button>{registeredAccount && <TrialEligibilityBadge item={registeredAccount} />}<dl><div><dt>身份</dt><dd>{job.display_name || "等待生成"}</dd></div><div><dt>出口 IP</dt><dd>{job.exit_ip || "等待识别"}</dd></div><div><dt>代理</dt><dd>{job.proxy_label}</dd></div></dl><footer><span>{job.display_message || job.message || "-"}</span><JobCommands job={job} exporting={exportingTokenBackup} onLogs={openLogs} onExport={(id) => exportTokenBackup([id])} onCancel={cancel} onRelease={setReleaseTarget} onDelete={(item) => setDeleteTarget({ kind: "job", ids: [item.id], item })} /></footer></article>;
             })}</div>
             <div className="table-footer"><span>共 {jobs.length} 个注册任务</span></div>
           </> : <EmptyState icon={UserPlus} title="还没有注册任务" description="选择源头邮箱和基础地址后开始注册。" />}
@@ -1463,7 +1524,7 @@ export default function RegistrationPage({ refreshKey }) {
       </>}
 
       {view === "accounts" && <section className="table-panel registration-account-panel">
-        <header className="panel-header"><div><h2>已注册账号</h2><p>使用原邮箱补设密码，也可通过可选的 SUB2 兼容服务添加账号 OAuth 授权</p></div><div className="toolbar-actions"><Button size="sm" icon={Download} loading={exportingTokenBackup} title="下载服务器已加密留存的全部账号令牌" onClick={exportTokenBackup}>下载 AT 备份</Button><Button size="sm" icon={RefreshCw} loading={checkingAccountSignals} disabled={!accounts.items.length} title="重新读取当前账号的实时状态和套餐" onClick={refreshSelectedAccountSignals}>刷新并检测</Button></div></header>
+        <header className="panel-header"><div><h2>已注册账号</h2><p>使用原邮箱补设密码，也可通过可选的 SUB2 兼容服务添加账号 OAuth 授权</p></div><div className="toolbar-actions"><Button size="sm" icon={Download} loading={exportingTokenBackup} title="下载服务器已加密留存的全部账号令牌" onClick={() => exportTokenBackup()}>下载 AT 备份</Button><Button size="sm" icon={RefreshCw} loading={checkingAccountSignals} disabled={!accounts.items.length} title="重新读取当前账号的实时状态和套餐" onClick={refreshSelectedAccountSignals}>刷新并检测</Button></div></header>
         {accounts.items.length ? <>
           {accountsError && <div className="inline-alert error"><AlertTriangle size={15} /><span>{accountsError}；当前保留上一次成功加载的账号列表。</span></div>}
           <div className="registration-bulk-bar">
@@ -1477,6 +1538,7 @@ export default function RegistrationPage({ refreshKey }) {
             <Button size="sm" icon={ListChecks} loading={checkingAccountSignals} disabled={!accounts.items.length} title={selectedAccountIds.length ? "重新检测所选账号的当前状态和订阅类型" : "一键重新检测全部账号的当前状态和订阅类型"} onClick={refreshSelectedAccountSignals}>{selectedAccountIds.length ? "检测所选状态/类型" : "检测全部状态/类型"}</Button>
             <Button size="sm" icon={Database} disabled={selectedAccountIds.length !== 1} title={selectedAccountIds.length > 1 ? "OAuth 每次只能授权一个账号" : "通过 OAuth 添加到 SUB2"} onClick={() => openNfapiImporter(selectedAccountIds)}>OAuth 添加到 SUB2</Button>
             <Button size="sm" icon={KeyRound} loading={copyingSelectedTokens} disabled={!selectedAccountIds.length} onClick={copySelectedAccessTokens}>复制所选 AT</Button>
+            <Button size="sm" icon={Download} loading={exportingMailboxLinks} disabled={!selectedAccountIds.length} title="按 别名----取件地址 格式导出所选 iCloud 账号" onClick={exportSelectedMailboxLinks}>导出别名取件地址</Button>
             <Button size="sm" variant="danger" icon={Trash2} disabled={!selectedAccountIds.length} onClick={() => setDeleteTarget({ kind: "accounts", ids: selectedAccountIds })}>删除所选</Button>
           </div>
           {visibleAccountItems.length ? <>

@@ -167,6 +167,11 @@ def _task_result_seed(result: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 def _task_account_keys(task_type: str, payload: dict[str, Any]) -> list[str]:
+    if task_type == TASK_TYPE_REGISTER:
+        extra = payload.get("extra") if isinstance(payload.get("extra"), dict) else {}
+        serial_key = str(extra.get("registration_serial_key") or "").strip()
+        if serial_key:
+            return [f"registration:{serial_key[:200]}"]
     if task_type in {TASK_TYPE_ACCOUNT_CHECK, TASK_TYPE_PLATFORM_ACTION}:
         account_id = int(payload.get("account_id", 0) or 0)
         if account_id > 0:
@@ -909,12 +914,16 @@ def _run_single_account_check(
     logger: TaskLogger | None = None,
     *,
     proxy_url: str | None = None,
+    check_plus_trial_eligibility: bool = False,
 ) -> tuple[bool, dict[str, Any]]:
     with Session(engine) as session:
         model = session.get(AccountModel, account_id)
         if not model:
             raise ValueError("账号不存在")
-        plugin = get(model.platform)(config=RegisterConfig(proxy=proxy_url))
+        plugin = get(model.platform)(config=RegisterConfig(
+            proxy=proxy_url,
+            extra={"check_plus_trial_eligibility": bool(check_plus_trial_eligibility)},
+        ))
         account = build_platform_account(session, model)
 
     valid = plugin.check_valid(account)
@@ -1010,6 +1019,11 @@ def _run_single_account_check(
             or ""
         ),
         "status_checked_at": checked_at,
+        "plus_trial_eligibility": str(check_overview.get("plus_trial_eligibility") or "unknown"),
+        "plus_trial_days": int(check_overview.get("plus_trial_days") or 0),
+        "plus_trial_checked_at": str(check_overview.get("plus_trial_checked_at") or ""),
+        "plus_trial_source": str(check_overview.get("plus_trial_source") or "")[:100],
+        "plus_trial_reason": str(check_overview.get("plus_trial_reason") or "")[:160],
     }
     if logger:
         logger.log(f"{account.email}: {'有效' if valid else '失效'}")

@@ -129,6 +129,7 @@ test("registration client refreshes only normalized ChatGPT account ids in one b
   assert.deepEqual(JSON.parse(calls[0].options.body), {
     ids: [7, 8],
     proxies_by_id: { 7: "http://proxy-user:proxy-password@proxy.example:8080" },
+    check_plus_trial_eligibility: true,
   });
   assert.equal(result.updated, 2);
 

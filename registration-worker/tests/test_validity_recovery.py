@@ -1150,10 +1150,17 @@ def test_authenticated_session_fallback_requires_exact_email_and_workspace(monke
 def test_batch_refresh_returns_status_code_reason_and_account_type(monkeypatch):
     account_id = _create_account(lifecycle_status="registered")
 
-    def _fake_check(selected_id, logger=None, *, proxy_url=None):
+    def _fake_check(
+        selected_id,
+        logger=None,
+        *,
+        proxy_url=None,
+        check_plus_trial_eligibility=False,
+    ):
         assert selected_id == account_id
         assert logger is None
         assert proxy_url is None
+        assert check_plus_trial_eligibility is False
         return False, {
             "account_id": selected_id,
             "email": "chatgpt@example.com",

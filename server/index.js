@@ -327,6 +327,7 @@ export function createApp(options = {}) {
   const registration = new RegistrationService({
     db,
     graph: inbox,
+    icloud,
     client: registrationClient,
     publicBaseUrl,
     mailboxBaseUrl: process.env.REGISTRATION_MAILBOX_URL,
@@ -450,9 +451,9 @@ export function createApp(options = {}) {
   app.get("/api/registration/accounts/:id/access-token", async (req, res, next) => {
     try { res.json(await registration.registeredAccountAccessToken(req.params.id)); } catch (error) { next(error); }
   });
-  app.get("/api/registration/accounts/token-backup", async (_req, res, next) => {
+  app.get("/api/registration/accounts/token-backup", async (req, res, next) => {
     try {
-      const backup = await registration.exportRegisteredAccountBackups();
+      const backup = await registration.exportRegisteredAccountBackups({ ids: req.query.ids });
       const date = new Date().toISOString().slice(0, 10);
       res.set({
         "Cache-Control": "no-store",
@@ -460,6 +461,20 @@ export function createApp(options = {}) {
         "Content-Type": "application/json; charset=utf-8",
       });
       res.send(`${JSON.stringify(backup, null, 2)}\n`);
+    } catch (error) { next(error); }
+  });
+  app.post("/api/registration/accounts/mailbox-links", (req, res, next) => {
+    try {
+      const exported = registration.exportRegisteredMailboxLinks(req.body || {});
+      const date = new Date().toISOString().slice(0, 10);
+      res.set({
+        "Cache-Control": "no-store",
+        "Content-Disposition": `attachment; filename="aliashub-icloud-mailboxes-${date}.txt"`,
+        "Content-Type": "text/plain; charset=utf-8",
+        "X-AliasHub-Exported": String(exported.exported),
+        "X-AliasHub-Skipped": String(exported.skipped),
+      });
+      res.send(exported.text);
     } catch (error) { next(error); }
   });
   app.get("/api/registration/accounts/:id/emails", async (req, res, next) => {

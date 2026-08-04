@@ -150,7 +150,7 @@ export class RegistrationClient {
     }
     return this.request("/api/accounts/refresh-plan?platform=chatgpt", {
       method: "POST",
-      body: { ids, proxies_by_id: normalizedProxies },
+      body: { ids, proxies_by_id: normalizedProxies, check_plus_trial_eligibility: true },
       timeoutMs: 120_000,
     });
   }

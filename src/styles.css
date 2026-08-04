@@ -208,6 +208,10 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .registration-account-signal > small.check-invalid { color: var(--coral); }
 .registration-account-signal > small.check-detail { color: var(--text-soft); }
 .registration-account-signal > small.check-meta { max-width: 240px; color: var(--text-faint); -webkit-line-clamp: 1; }
+.trial-eligibility { display: inline-flex; align-items: center; gap: 4px; width: max-content; max-width: 170px; border: 1px solid var(--line); border-radius: 999px; padding: 2px 6px; font-size: 8px; font-weight: 700; line-height: 1.25; white-space: nowrap; }
+.trial-eligibility.eligible { border-color: color-mix(in srgb, var(--green) 35%, var(--line)); background: var(--green-soft); color: var(--green-dark); }
+.trial-eligibility.ineligible { background: var(--surface-3); color: var(--text-soft); }
+.trial-eligibility.pending { border-color: color-mix(in srgb, var(--amber) 30%, var(--line)); background: var(--amber-soft); color: var(--amber); }
 .registration-account-signal.compact { min-width: 0; flex: 1; }
 .registration-account-signal.compact > small { max-width: 100%; }
 .registration-nfapi-status { display: grid; justify-items: start; gap: 3px; max-width: 150px; }

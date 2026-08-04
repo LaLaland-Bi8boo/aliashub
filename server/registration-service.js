@@ -742,6 +742,27 @@ function accountStatusSignals(item = {}, persistedOutcome = null) {
     ? item.overview : {};
   const summaryStatus = item.display_summary?.status && typeof item.display_summary.status === "object"
     ? item.display_summary.status : {};
+  const plusTrialEligibilityRaw = normalizeRemoteSignal(firstRemoteText(
+    item.plus_trial_eligibility,
+    overview.plus_trial_eligibility,
+  ), "unknown");
+  const plusTrialEligibility = new Set(["eligible", "ineligible"]).has(plusTrialEligibilityRaw)
+    ? plusTrialEligibilityRaw : "unknown";
+  const plusTrialDays = Math.max(0, Math.min(365, Number(
+    item.plus_trial_days ?? overview.plus_trial_days ?? 0,
+  ) || 0));
+  const plusTrialCheckedAt = safeRemoteText(firstRemoteText(
+    item.plus_trial_checked_at,
+    overview.plus_trial_checked_at,
+  ), 80);
+  const plusTrialSource = safeAccountCheckText(firstRemoteText(
+    item.plus_trial_source,
+    overview.plus_trial_source,
+  ), 100);
+  const plusTrialReason = safeAccountCheckText(firstRemoteText(
+    item.plus_trial_reason,
+    overview.plus_trial_reason,
+  ), 160);
   const lifecycleStatus = normalizeRemoteSignal(
     firstRemoteText(item.lifecycle_status, overview.lifecycle_status, summaryStatus.lifecycle),
     "unknown",
@@ -1024,6 +1045,11 @@ function accountStatusSignals(item = {}, persistedOutcome = null) {
     refresh_token_available: refreshTokenAvailable,
     id_token_available: idTokenAvailable,
     credentials_available: anyCredentialAvailable,
+    plus_trial_eligibility: plusTrialEligibility,
+    plus_trial_days: plusTrialDays,
+    plus_trial_checked_at: plusTrialCheckedAt,
+    plus_trial_source: plusTrialSource,
+    plus_trial_reason: plusTrialReason,
   };
 }
 
@@ -1381,9 +1407,10 @@ function identityFromEvents(events = []) {
 }
 
 export class RegistrationService {
-  constructor({ db, graph, client, publicBaseUrl, mailboxBaseUrl, browserUrl, encryptionKey } = {}) {
+  constructor({ db, graph, icloud, client, publicBaseUrl, mailboxBaseUrl, browserUrl, encryptionKey } = {}) {
     this.db = db;
     this.graph = graph;
+    this.icloud = icloud;
     this.client = client;
     this.connectorKey = getSetting(db, "registration_connector_key", "");
     this.mailboxBaseUrl = String(mailboxBaseUrl || publicBaseUrl || "").replace(/\/$/, "");
@@ -1643,6 +1670,9 @@ export class RegistrationService {
     const base = this.db.prepare("SELECT * FROM addresses WHERE id = ? AND account_id = ? AND kind IN ('primary', 'official') AND status = 'active'").get(Number(input.baseAddressId), account.id);
     if (!base) throw Object.assign(new Error("请选择可用的基础地址"), { status: 400 });
     const proxies = resolveJobProxies(input, this.getProxyPool());
+    const registrationSerialKey = account.provider === "icloud"
+      ? `icloud:${crypto.createHash("sha256").update(String(account.email || "").trim().toLowerCase()).digest("hex").slice(0, 24)}`
+      : "";
     const addresses = generateSplits(this.db, account, {
       baseAddressIds: [base.id],
       countPerBase: count,
@@ -1692,6 +1722,7 @@ export class RegistrationService {
             disable_phone_verification: true,
             phone_verification_policy: "forbid",
             allow_chatgpt_registration_proxy: true,
+            ...(registrationSerialKey ? { registration_serial_key: registrationSerialKey } : {}),
             set_password_after_registration: setPasswordAfterRegistration,
             auto_continue_post_signup: autoContinuePostSignup,
           },
@@ -2535,11 +2566,24 @@ export class RegistrationService {
     return { id: accountId, email: account.email, access_token: accessToken };
   }
 
-  async exportRegisteredAccountBackups() {
-    const rows = this.db.prepare(`
-      SELECT * FROM registered_account_backups
-      ORDER BY email COLLATE NOCASE, external_account_id
-    `).all();
+  async exportRegisteredAccountBackups({ ids } = {}) {
+    const selectedIds = ids === undefined || ids === null || ids === ""
+      ? []
+      : [...new Set((Array.isArray(ids) ? ids : String(ids).split(","))
+        .map((value) => Number(value)))];
+    if (selectedIds.some((id) => !Number.isSafeInteger(id) || id <= 0) || selectedIds.length > 500) {
+      throw Object.assign(new Error("请选择有效的注册账号"), { status: 400 });
+    }
+    const rows = selectedIds.length
+      ? this.db.prepare(`
+        SELECT * FROM registered_account_backups
+        WHERE external_account_id IN (${selectedIds.map(() => "?").join(",")})
+        ORDER BY email COLLATE NOCASE, external_account_id
+      `).all(...selectedIds.map(String))
+      : this.db.prepare(`
+        SELECT * FROM registered_account_backups
+        ORDER BY email COLLATE NOCASE, external_account_id
+      `).all();
     if (!rows.length) {
       throw Object.assign(new Error("还没有可导出的 AT 本地备份，请先刷新已注册账号列表"), { status: 404 });
     }
@@ -2557,6 +2601,42 @@ export class RegistrationService {
         captured_at: row.captured_at,
         updated_at: row.updated_at,
       })),
+    };
+  }
+
+  exportRegisteredMailboxLinks(input = {}) {
+    const ids = normalizeAccountCheckIds(input);
+    const rows = this.db.prepare(`
+      SELECT registration_jobs.external_account_id, registration_jobs.email,
+        source_accounts.provider, icloud_mailboxes.access_url_encrypted
+      FROM registration_jobs
+      JOIN source_accounts ON source_accounts.id = registration_jobs.account_id
+      LEFT JOIN icloud_mailboxes ON icloud_mailboxes.account_id = source_accounts.id
+      WHERE registration_jobs.external_account_id IN (${ids.map(() => "?").join(",")})
+        AND registration_jobs.status = 'completed'
+      ORDER BY registration_jobs.created_at DESC, registration_jobs.id DESC
+    `).all(...ids.map(String));
+    const selected = new Map();
+    for (const row of rows) {
+      const id = Number(row.external_account_id);
+      if (!selected.has(id)) selected.set(id, row);
+    }
+    const exported = [];
+    for (const id of ids) {
+      const row = selected.get(id);
+      if (row?.provider !== "icloud" || !row.access_url_encrypted) continue;
+      if (!this.icloud || typeof this.icloud.decrypt !== "function") {
+        throw Object.assign(new Error("iCloud 取件地址导出服务尚未配置"), { status: 503 });
+      }
+      exported.push(`${row.email}----${this.icloud.decrypt(row.access_url_encrypted)}`);
+    }
+    if (!exported.length) {
+      throw Object.assign(new Error("所选账号没有可导出的 iCloud 取件地址"), { status: 404 });
+    }
+    return {
+      text: `${exported.join("\n")}\n`,
+      exported: exported.length,
+      skipped: ids.length - exported.length,
     };
   }
 

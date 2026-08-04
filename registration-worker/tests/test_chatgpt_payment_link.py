@@ -85,6 +85,68 @@ def test_generate_plus_link_posts_hosted_checkout_payload(monkeypatch):
     }
 
 
+@pytest.mark.parametrize(
+    ("init_data", "expected_status"),
+    [
+        (
+            {
+                "total_summary": {"due": 0, "total": 2000},
+                "line_item_group": {"total": 2000},
+                "invoice": {
+                    "amount_due": 2000,
+                    "billing_cycle_anchor": "2026-09-04T00:00:00Z",
+                    "has_prorations": False,
+                },
+            },
+            "eligible",
+        ),
+        (
+            {
+                "total_summary": {"due": 2000, "total": 2000},
+                "line_item_group": {"total": 2000},
+                "invoice": {"amount_due": 2000},
+            },
+            "ineligible",
+        ),
+    ],
+)
+def test_check_plus_trial_eligibility_uses_official_amount_due(monkeypatch, init_data, expected_status):
+    monkeypatch.setattr(
+        payment_module,
+        "generate_plus_link",
+        lambda account, proxy=None, country="US": "https://pay.openai.com/c/pay/cs_live_trialcheck123",
+    )
+    monkeypatch.setattr(
+        payment_module,
+        "_stripe_init_checkout_data",
+        lambda cs_id, publishable_key, proxy=None: init_data,
+    )
+
+    result = payment_module.check_plus_trial_eligibility(
+        SimpleNamespace(access_token="at", cookies=""),
+    )
+
+    assert result["eligibility"] == expected_status
+    assert result["eligible"] is (expected_status == "eligible")
+    assert result["trial_days"] == (30 if expected_status == "eligible" else 0)
+
+
+def test_check_plus_trial_eligibility_rejects_ambiguous_checkout(monkeypatch):
+    monkeypatch.setattr(
+        payment_module,
+        "generate_plus_link",
+        lambda account, proxy=None, country="US": "https://pay.openai.com/c/pay/cs_live_trialcheck123",
+    )
+    monkeypatch.setattr(
+        payment_module,
+        "_stripe_init_checkout_data",
+        lambda cs_id, publishable_key, proxy=None: {},
+    )
+
+    with pytest.raises(ValueError, match="未返回今日应付金额"):
+        payment_module.check_plus_trial_eligibility(SimpleNamespace(access_token="at", cookies=""))
+
+
 _MEIGUODIZHI_FAKE_RESPONSE = {
     "status": "ok",
     "address": {

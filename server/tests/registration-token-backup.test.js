@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { createDatabase, nowIso } from "../db.js";
+import { createDatabase, createSourceAccount, nowIso } from "../db.js";
 import { createApp } from "../index.js";
 import { jsonRequest } from "./http-harness.js";
 
@@ -97,6 +97,15 @@ test("captures encrypted registration tokens and exposes them only through expli
       updated_at: stored.updated_at,
     });
 
+    const selected = await jsonRequest(runtime.app, "/api/registration/accounts/token-backup?ids=27");
+    assert.equal(selected.response.status, 200);
+    assert.equal(selected.body.accounts.length, 1);
+    assert.equal(selected.body.accounts[0].external_account_id, "27");
+
+    const invalidSelection = await jsonRequest(runtime.app, "/api/registration/accounts/token-backup?ids=invalid");
+    assert.equal(invalidSelection.response.status, 400);
+    assert.equal(invalidSelection.body.error, "请选择有效的注册账号");
+
     assert.throws(
       () => runtime.registration.persistRegisteredAccountBackup({ ...account, email: "different@example.com" }),
       (error) => error.code === "ACCOUNT_BACKUP_IDENTITY_MISMATCH",
@@ -109,6 +118,72 @@ test("captures encrypted registration tokens and exposes them only through expli
     assert.equal(current.db.prepare("SELECT COUNT(*) AS count FROM registered_account_backups").get().count, 0);
   } finally {
     await new Promise((resolve) => setImmediate(resolve));
+    current.close();
+  }
+});
+
+test("exports selected iCloud registration aliases with their original mailbox URL", async () => {
+  const current = fixture();
+  const accessUrl = "http://apple55.top/messages/test-token/base_mailbox@icloud.com";
+  const icloudAccount = createSourceAccount(current.db, {
+    provider: "icloud",
+    email: "base_mailbox@icloud.com",
+  });
+  const outlookAccount = createSourceAccount(current.db, {
+    provider: "microsoft",
+    email: "other@example.com",
+  });
+  const runtime = createApp({
+    db: current.db,
+    dataEncryptionKey: "mailbox-export-test-key",
+  });
+  const timestamp = nowIso();
+  current.db.prepare(`
+    INSERT INTO icloud_mailboxes (account_id, access_url_encrypted, credential_updated_at)
+    VALUES (?, ?, ?)
+  `).run(icloudAccount.id, runtime.icloud.encrypt(accessUrl), timestamp);
+  const insertJob = current.db.prepare(`
+    INSERT INTO registration_jobs
+      (account_id, email, external_task_id, external_account_id, status, stage, created_at, updated_at, finished_at)
+    VALUES (?, ?, ?, ?, 'completed', 'completed', ?, ?, ?)
+  `);
+  insertJob.run(icloudAccount.id, "base_mailbox+first@icloud.com", "task-31", "31", timestamp, timestamp, timestamp);
+  insertJob.run(icloudAccount.id, "base_mailbox+second@icloud.com", "task-32", "32", timestamp, timestamp, timestamp);
+  insertJob.run(outlookAccount.id, "other+tag@example.com", "task-33", "33", timestamp, timestamp, timestamp);
+
+  const server = runtime.app.listen(0, "127.0.0.1");
+  await new Promise((resolve, reject) => {
+    server.once("listening", resolve);
+    server.once("error", reject);
+  });
+  try {
+    const { port } = server.address();
+    const response = await fetch(`http://127.0.0.1:${port}/api/registration/accounts/mailbox-links`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: [31, 32, 33] }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.match(response.headers.get("content-disposition"), /attachment; filename="aliashub-icloud-mailboxes-\d{4}-\d{2}-\d{2}\.txt"/);
+    assert.equal(response.headers.get("content-type"), "text/plain; charset=utf-8");
+    assert.equal(response.headers.get("x-aliashub-exported"), "2");
+    assert.equal(response.headers.get("x-aliashub-skipped"), "1");
+    assert.equal(await response.text(), [
+      `base_mailbox+first@icloud.com----${accessUrl}`,
+      `base_mailbox+second@icloud.com----${accessUrl}`,
+      "",
+    ].join("\n"));
+
+    const unavailable = await fetch(`http://127.0.0.1:${port}/api/registration/accounts/mailbox-links`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids: [33] }),
+    });
+    assert.equal(unavailable.status, 404);
+    assert.equal((await unavailable.json()).error, "所选账号没有可导出的 iCloud 取件地址");
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     current.close();
   }
 });

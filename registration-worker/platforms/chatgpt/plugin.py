@@ -4,6 +4,7 @@ import re
 import secrets
 import threading
 import time
+from datetime import datetime, timezone
 from core.base_platform import BasePlatform, Account, AccountStatus, RegisterConfig
 from core.base_mailbox import BaseMailbox
 from core.registration import BrowserRegistrationAdapter, OtpSpec, ProtocolMailboxAdapter, ProtocolOAuthAdapter, RegistrationCapability, RegistrationResult
@@ -650,6 +651,44 @@ class ChatGPTPlatform(BasePlatform):
                         overview["session_valid"] = True
                     if details.get("plan_source"):
                         overview["plan_source"] = details["plan_source"]
+                    previous_trial_eligibility = str(
+                        existing_overview.get("plus_trial_eligibility") or ""
+                    ).strip().lower()
+                    should_check_plus_trial = bool(
+                        self.config
+                        and isinstance(self.config.extra, dict)
+                        and self.config.extra.get("check_plus_trial_eligibility")
+                    )
+                    if should_check_plus_trial and status == "free" \
+                            and previous_trial_eligibility not in {"eligible", "ineligible"}:
+                        try:
+                            from platforms.chatgpt.payment import check_plus_trial_eligibility
+
+                            trial_country = str(
+                                getattr(account, "region", "") or extra.get("region") or "US"
+                            ).strip().upper()
+                            if not re.fullmatch(r"[A-Z]{2}", trial_country):
+                                trial_country = "US"
+                            trial_result = check_plus_trial_eligibility(
+                                a,
+                                proxy=proxy,
+                                country=trial_country,
+                            )
+                            overview.update({
+                                "plus_trial_eligibility": trial_result["eligibility"],
+                                "plus_trial_days": int(trial_result.get("trial_days") or 0),
+                                "plus_trial_checked_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                                "plus_trial_source": str(trial_result.get("source") or "")[:100],
+                                "plus_trial_reason": "官方结账页今日应付为 0" if trial_result.get("eligible")
+                                else "官方结账页今日应付不为 0",
+                            })
+                        except Exception:
+                            overview.update({
+                                "plus_trial_eligibility": "unknown",
+                                "plus_trial_checked_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                                "plus_trial_source": "openai-checkout/plus-1-month-free",
+                                "plus_trial_reason": "官方免费试用资格检测暂时失败",
+                            })
                     if type_observed and source.startswith("backend-api/") and status not in {"", "unknown", "other"} \
                             and plan_type_source not in {"last_confirmed_plan", "last_confirmed_paid_plan"}:
                         overview["plan_override"] = ""

@@ -117,6 +117,7 @@ class AccountChecksService:
         *,
         account_ids: list[int] | None = None,
         account_proxies: dict[int, str] | None = None,
+        check_plus_trial_eligibility: bool = False,
         max_workers: int = 20,
         timeout_seconds: int = 120,
     ) -> dict[str, Any]:
@@ -176,7 +177,11 @@ class AccountChecksService:
                 proxy_url = str((account_proxies or {}).get(account_id) or "").strip()
                 if proxy_url:
                     build_proxy_config(proxy_url)
-                valid, payload = _run_single_account_check(account_id, proxy_url=proxy_url or None)
+                valid, payload = _run_single_account_check(
+                    account_id,
+                    proxy_url=proxy_url or None,
+                    check_plus_trial_eligibility=check_plus_trial_eligibility,
+                )
                 public_payload = {
                     "account_id": account_id,
                     "valid": bool(valid),
@@ -188,6 +193,8 @@ class AccountChecksService:
                     "credential_status", "subscription_status", "account_type", "account_type_raw",
                     "account_type_source", "status_code", "status_reason", "status_retryable",
                     "status_http", "status_evidence_path", "status_source", "status_checked_at",
+                    "plus_trial_eligibility", "plus_trial_days", "plus_trial_checked_at",
+                    "plus_trial_source", "plus_trial_reason",
                 ):
                     public_payload[key] = payload.get(key)
                 return public_payload

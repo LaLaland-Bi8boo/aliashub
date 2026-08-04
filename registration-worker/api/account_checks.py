@@ -18,6 +18,7 @@ class _RefreshPlanBody(BaseModel):
 
     ids: list[int] = Field(default_factory=list)
     proxies_by_id: dict[int, str] = Field(default_factory=dict)
+    check_plus_trial_eligibility: bool = False
 
 
 @router.post("/check-all")
@@ -45,6 +46,7 @@ def refresh_plan(
         platform,
         account_ids=ids or None,
         account_proxies=proxies_by_id,
+        check_plus_trial_eligibility=bool(body and body.check_plus_trial_eligibility),
     )
 
 
