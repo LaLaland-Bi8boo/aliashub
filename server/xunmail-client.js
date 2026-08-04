@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { publicAccount } from "./account-service.js";
 import { codeFromText, normalizeEmail, normalizeMicrosoftEmail } from "./address-generator.js";
 import { audit, createSourceAccount, nowIso } from "./db.js";
+import { htmlToText } from "./mail-content.js";
 
 const DEFAULT_BASE_URL = "https://www.xunmail.cn";
 const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
@@ -25,26 +26,6 @@ function firstValue(...values) {
 function emailFrom(value) {
   const matches = scalar(value).match(EMAIL_PATTERN) || [];
   return matches.map((item) => normalizeEmail(item)).find(Boolean) || "";
-}
-
-function htmlToText(value) {
-  return scalar(value)
-    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/p\s*>|<\/div\s*>|<\/li\s*>|<\/tr\s*>/gi, "\n")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&#(x[0-9a-f]+|\d+);/gi, (match, entity) => {
-      const codePoint = entity.toLowerCase().startsWith("x")
-        ? Number.parseInt(entity.slice(1), 16)
-        : Number.parseInt(entity, 10);
-      try { return String.fromCodePoint(codePoint); } catch { return match; }
-    })
-    .replace(/&(nbsp|amp|lt|gt|quot|apos|#39);/gi, (match, entity) => ({
-      nbsp: " ", amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", "#39": "'",
-    })[entity.toLowerCase()] || match)
-    .replace(/[ \t\f\v]+/g, " ")
-    .replace(/\s*\n\s*/g, "\n")
-    .trim();
 }
 
 function addressesFrom(value) {

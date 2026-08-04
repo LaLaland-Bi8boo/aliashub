@@ -173,6 +173,12 @@ const schema = `
     token_updated_at TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS icloud_mailboxes (
+    account_id INTEGER PRIMARY KEY REFERENCES source_accounts(id) ON DELETE CASCADE,
+    access_url_encrypted TEXT NOT NULL,
+    credential_updated_at TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS oauth_code_sessions (
     id TEXT PRIMARY KEY,
     expected_account_id INTEGER REFERENCES source_accounts(id) ON DELETE SET NULL,
@@ -256,6 +262,20 @@ const schema = `
 
   CREATE INDEX IF NOT EXISTS idx_registered_account_metadata_group
     ON registered_account_metadata(group_name COLLATE NOCASE, updated_at DESC);
+
+  CREATE TABLE IF NOT EXISTS registered_account_backups (
+    external_account_id TEXT PRIMARY KEY,
+    email TEXT NOT NULL COLLATE NOCASE,
+    access_token_encrypted TEXT NOT NULL,
+    session_token_encrypted TEXT NOT NULL DEFAULT '',
+    user_id TEXT NOT NULL DEFAULT '',
+    account_id TEXT NOT NULL DEFAULT '',
+    captured_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_registered_account_backups_email
+    ON registered_account_backups(email COLLATE NOCASE, updated_at DESC);
 
   CREATE TABLE IF NOT EXISTS registered_account_status_checks (
     external_account_id TEXT PRIMARY KEY,

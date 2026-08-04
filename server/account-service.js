@@ -27,6 +27,8 @@ export function publicAccount(db, row) {
       ? Boolean(db.prepare("SELECT 1 FROM microsoft_tokens WHERE account_id = ?").get(row.id))
       : provider === "xunmail"
         ? Boolean(db.prepare("SELECT 1 FROM xunmail_tokens WHERE account_id = ?").get(row.id))
+        : provider === "icloud"
+          ? Boolean(db.prepare("SELECT 1 FROM icloud_mailboxes WHERE account_id = ?").get(row.id))
         : false;
   return {
     ...row,
@@ -38,7 +40,7 @@ export function publicAccount(db, row) {
     address_count: counts.address_count || 0,
     oauth_connected: oauthConnected,
     supports_official_aliases: provider === "microsoft",
-    supports_plus_aliases: ["microsoft", "google", "xunmail"].includes(provider),
+    supports_plus_aliases: ["microsoft", "google", "xunmail", "icloud"].includes(provider),
   };
 }
 
@@ -335,7 +337,9 @@ export class JobRunner {
       status: "running",
       message: account.provider === "google"
         ? "正在读取 Gmail 收件箱"
-        : account.provider === "xunmail" ? "正在通过 Xunmail 读取收件箱" : "正在读取 Outlook 收件箱",
+        : account.provider === "xunmail"
+          ? "正在通过 Xunmail 读取收件箱"
+          : account.provider === "icloud" ? "正在读取 iCloud 取件箱" : "正在读取 Outlook 收件箱",
       started_at: nowIso(),
     });
     try {

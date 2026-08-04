@@ -9,6 +9,7 @@ import { microsoftDomains, normalizeMicrosoftEmail } from "./address-generator.j
 import { audit, createDatabase, createSourceAccount, getSettings, nowIso, setSetting } from "./db.js";
 import { ExtensionService } from "./extension-service.js";
 import { GoogleGmailClient } from "./google-gmail.js";
+import { IcloudClient } from "./icloud-client.js";
 import { MicrosoftGraphClient } from "./microsoft-graph.js";
 import { NfapiService } from "./nfapi-service.js";
 import { RegistrationClient } from "./registration-client.js";
@@ -296,11 +297,19 @@ export function createApp(options = {}) {
     fetchFn: options.xunmailFetchFn || options.fetchFn,
     baseUrl: options.xunmailBaseUrl || process.env.XUNMAIL_BASE_URL,
   });
+  const icloud = options.icloud || new IcloudClient({
+    db,
+    encryptionKey: options.dataEncryptionKey || process.env.DATA_ENCRYPTION_KEY,
+    fetchFn: options.icloudFetchFn || options.fetchFn,
+    allowedHosts: options.icloudAllowedHosts,
+    timezoneOffset: options.icloudTimezoneOffset,
+  });
   const inbox = options.inbox || {
     scanInbox(account) {
       if (account.provider === "google") return gmail.scanInbox(account);
       if (account.provider === "microsoft") return graph.scanInbox(account);
       if (account.provider === "xunmail") return xunmail.scanInbox(account);
+      if (account.provider === "icloud") return icloud.scanInbox(account);
       throw Object.assign(new Error(`不支持的邮箱提供商：${account.provider}`), {
         status: 409,
         code: "UNSUPPORTED_MAIL_PROVIDER",
@@ -322,6 +331,7 @@ export function createApp(options = {}) {
     publicBaseUrl,
     mailboxBaseUrl: process.env.REGISTRATION_MAILBOX_URL,
     browserUrl: process.env.REGISTRATION_BROWSER_URL,
+    encryptionKey: options.dataEncryptionKey || process.env.DATA_ENCRYPTION_KEY,
   });
   const nfapi = options.nfapi || new NfapiService({
     db,
@@ -440,6 +450,18 @@ export function createApp(options = {}) {
   app.get("/api/registration/accounts/:id/access-token", async (req, res, next) => {
     try { res.json(await registration.registeredAccountAccessToken(req.params.id)); } catch (error) { next(error); }
   });
+  app.get("/api/registration/accounts/token-backup", async (_req, res, next) => {
+    try {
+      const backup = await registration.exportRegisteredAccountBackups();
+      const date = new Date().toISOString().slice(0, 10);
+      res.set({
+        "Cache-Control": "no-store",
+        "Content-Disposition": `attachment; filename="aliashub-at-backup-${date}.json"`,
+        "Content-Type": "application/json; charset=utf-8",
+      });
+      res.send(`${JSON.stringify(backup, null, 2)}\n`);
+    } catch (error) { next(error); }
+  });
   app.get("/api/registration/accounts/:id/emails", async (req, res, next) => {
     try { res.json(await registration.registeredAccountEmails(req.params.id, req.query)); } catch (error) { next(error); }
   });
@@ -516,6 +538,11 @@ export function createApp(options = {}) {
     catch (error) { next(error); }
   });
 
+  app.post("/api/icloud/import", async (req, res, next) => {
+    try { res.status(201).json(await icloud.importCredentials(req.body?.credential)); }
+    catch (error) { next(error); }
+  });
+
   app.get("/api/overview", (_req, res) => {
     const accounts = db.prepare(`
       SELECT COUNT(*) AS total,
@@ -573,6 +600,7 @@ export function createApp(options = {}) {
         microsoft: { supportsOfficialAliases: true, supportsPlusAliases: true },
         google: { supportsOfficialAliases: false, supportsPlusAliases: true },
         xunmail: { supportsOfficialAliases: false, supportsPlusAliases: true },
+        icloud: { supportsOfficialAliases: false, supportsPlusAliases: true },
       },
     });
   });
@@ -1160,7 +1188,7 @@ export function createApp(options = {}) {
     if (status >= 500) console.error(error);
     res.status(status).json({ error: status >= 500 ? "服务器处理请求失败" : error.message });
   });
-  return { app, db, graph, gmail, xunmail, inbox, extension, jobs, registration, nfapi };
+  return { app, db, graph, gmail, xunmail, icloud, inbox, extension, jobs, registration, nfapi };
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

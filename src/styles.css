@@ -311,6 +311,7 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .google-mark { display: grid; place-items: center; padding: 2px; background: #fff; }
 .google-mark b { color: #4285f4; font: 750 calc(var(--mark-size) * 0.58)/1 Arial, sans-serif; }
 .xunmail-mark { display: grid; place-items: center; background: #eaf7ff; border-color: #b9dff5; color: #1677a8; }
+.icloud-mark { display: grid; place-items: center; background: #f3f6f8; border-color: #cbd4da; color: #4d6673; }
 
 .context-bar { min-height: 50px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px 8px 14px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
 .context-copy { display: flex; align-items: center; gap: 8px; color: var(--text-soft); font-size: 13px; }
@@ -330,6 +331,7 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .segmented button.active b { color: var(--green); }
 .segmented .google-mark b { color: #4285f4; font: 750 calc(var(--mark-size) * 0.58)/1 Arial, sans-serif; }
 .segmented .xunmail-mark { flex: 0 0 18px; width: 18px; height: 18px; border-radius: 4px; }
+.segmented .icloud-mark { flex: 0 0 18px; width: 18px; height: 18px; border-radius: 4px; }
 
 .panel, .table-panel { border: 1px solid var(--line); border-radius: 7px; background: var(--surface); box-shadow: var(--shadow); }
 .panel-header { min-height: 66px; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 14px 17px; border-bottom: 1px solid var(--line); }
@@ -1024,6 +1026,7 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
   .source-alias-mini { min-width: 48px; }
   .segmented button { padding: 0 8px; }
   .segmented button svg { display: none; }
+  .oauth-start-panel > .segmented .provider-mark { display: none; }
   .mail-toolbar-controls { grid-template-columns: 1fr; }
   .mail-toolbar-controls .search-box { grid-column: auto; }
   .mail-toolbar-controls > .button { width: 100%; }

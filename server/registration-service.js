@@ -1381,13 +1381,16 @@ function identityFromEvents(events = []) {
 }
 
 export class RegistrationService {
-  constructor({ db, graph, client, publicBaseUrl, mailboxBaseUrl, browserUrl } = {}) {
+  constructor({ db, graph, client, publicBaseUrl, mailboxBaseUrl, browserUrl, encryptionKey } = {}) {
     this.db = db;
     this.graph = graph;
     this.client = client;
     this.connectorKey = getSetting(db, "registration_connector_key", "");
     this.mailboxBaseUrl = String(mailboxBaseUrl || publicBaseUrl || "").replace(/\/$/, "");
     this.browserUrl = browserUrl || "/alias-hub/browser/vnc.html?autoconnect=true&resize=scale&path=alias-hub/browser/websockify";
+    this.backupEncryptionKey = crypto.createHash("sha256")
+      .update(String(encryptionKey || process.env.DATA_ENCRYPTION_KEY || "aliashub-development-key"))
+      .digest();
     this.scanPromises = new Map();
     this.accountStatusRefreshAttempts = new Map();
     this.accountStatusCheckOutcomes = new Map();
@@ -1401,6 +1404,69 @@ export class RegistrationService {
     } catch {
       // Keep the in-memory Map fallback for callers using an older test database.
     }
+  }
+
+  encryptAccountBackup(value) {
+    if (!value) return "";
+    const iv = crypto.randomBytes(12);
+    const cipher = crypto.createCipheriv("aes-256-gcm", this.backupEncryptionKey, iv);
+    const encrypted = Buffer.concat([cipher.update(String(value), "utf8"), cipher.final()]);
+    return `v1.${iv.toString("base64url")}.${cipher.getAuthTag().toString("base64url")}.${encrypted.toString("base64url")}`;
+  }
+
+  decryptAccountBackup(value) {
+    if (!value) return "";
+    const [version, iv, tag, encrypted] = String(value).split(".");
+    if (version !== "v1" || !iv || !tag || !encrypted) {
+      throw Object.assign(new Error("本地账号备份无法解密"), { status: 500, code: "ACCOUNT_BACKUP_DECRYPT_FAILED" });
+    }
+    const decipher = crypto.createDecipheriv("aes-256-gcm", this.backupEncryptionKey, Buffer.from(iv, "base64url"));
+    decipher.setAuthTag(Buffer.from(tag, "base64url"));
+    return Buffer.concat([decipher.update(Buffer.from(encrypted, "base64url")), decipher.final()]).toString("utf8");
+  }
+
+  persistRegisteredAccountBackup(account, expectedJob = null) {
+    const externalAccountId = safeRemoteText(account?.id, 80);
+    const email = safeRemoteText(account?.email, 320).toLowerCase();
+    if (!externalAccountId || !email || normalizeRemoteSignal(account?.platform, "chatgpt") !== "chatgpt") return false;
+    const job = expectedJob || this.db.prepare(`
+      SELECT * FROM registration_jobs
+      WHERE external_account_id = ? AND status = 'completed' AND email = ? COLLATE NOCASE
+      ORDER BY created_at DESC LIMIT 1
+    `).get(externalAccountId, email);
+    if (!job || String(job.external_account_id) !== externalAccountId
+      || String(job.email || "").toLowerCase() !== email) {
+      throw Object.assign(new Error("注册账号与任务记录不匹配"), { status: 409, code: "ACCOUNT_BACKUP_IDENTITY_MISMATCH" });
+    }
+    const accessToken = accessTokenFromAccount(account);
+    if (!accessToken) return false;
+    const sessionToken = accountCredential(account, ["session_token", "sessionToken"]);
+    const accountId = accountCredential(account, ["account_id", "accountId", "chatgpt_account_id", "chatgptAccountId"])
+      || safeRemoteText(account?.account_id || account?.chatgpt_account_id, 160);
+    const timestamp = nowIso();
+    this.db.prepare(`
+      INSERT INTO registered_account_backups
+        (external_account_id, email, access_token_encrypted, session_token_encrypted,
+          user_id, account_id, captured_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(external_account_id) DO UPDATE SET
+        email = excluded.email,
+        access_token_encrypted = excluded.access_token_encrypted,
+        session_token_encrypted = excluded.session_token_encrypted,
+        user_id = excluded.user_id,
+        account_id = excluded.account_id,
+        updated_at = excluded.updated_at
+    `).run(
+      externalAccountId,
+      email,
+      this.encryptAccountBackup(accessToken),
+      this.encryptAccountBackup(sessionToken),
+      safeRemoteText(account?.user_id, 160),
+      accountId,
+      timestamp,
+      timestamp,
+    );
+    return true;
   }
 
   persistAccountStatusOutcome(outcome) {
@@ -1664,9 +1730,11 @@ export class RegistrationService {
       const status = statusFromExternal(task.status);
       const lastMessage = events.length ? eventMessage(events[events.length - 1]) : "";
       let externalAccountId = row.external_account_id;
+      let completedAccount = null;
       if (status === "completed") {
         const accounts = await this.client.listAccounts({ email: row.email, pageSize: 10 });
         const match = (accounts.items || []).find((item) => String(item.email).toLowerCase() === row.email.toLowerCase());
+        completedAccount = match || null;
         externalAccountId = String(match?.id || externalAccountId || "");
       }
       const finishedAt = TERMINAL_STATUSES.has(status) ? (row.finished_at || nowIso()) : null;
@@ -1694,6 +1762,17 @@ export class RegistrationService {
           UPDATE verification_codes SET is_used = 1, is_hidden = 1
           WHERE address_id = ? AND received_at >= ?
         `).run(row.address_id, row.created_at);
+      }
+      if (completedAccount && externalAccountId) {
+        try {
+          this.persistRegisteredAccountBackup(completedAccount, {
+            ...row,
+            external_account_id: externalAccountId,
+            status: "completed",
+          });
+        } catch {
+          // The account list sync retries backup capture without exposing token material in task logs.
+        }
       }
     } catch (error) {
       const message = redactProxySecrets(error?.message) || "同步注册任务状态失败";
@@ -2182,6 +2261,11 @@ export class RegistrationService {
         // The first list is still authoritative enough to render unchecked state.
       }
     }
+    matched.forEach(({ item, job }) => {
+      try { this.persistRegisteredAccountBackup(item, job); } catch { /* Retry on the next account sync. */ }
+    });
+    const backupByAccountId = new Map(this.db.prepare("SELECT * FROM registered_account_backups").all()
+      .map((item) => [String(item.external_account_id), item]));
     return {
       total: matched.length,
       items: matched.map(({ item, job }) => {
@@ -2189,6 +2273,9 @@ export class RegistrationService {
         const passwordSetup = this.passwordSetupAvailability(job, item, passwordMetadata);
         const metadata = metadataByAccountId.get(String(item.id || ""));
         const nfapiLink = nfapiByAccountId.get(String(item.id || ""));
+        const backup = backupByAccountId.get(String(item.id || ""));
+        const backupMatches = backup
+          && String(backup.email || "").toLowerCase() === String(item.email || "").toLowerCase();
         const checkOutcome = this.accountStatusCheckOutcomes.get(String(item.id || ""));
         const checkOutcomeMatches = checkOutcome
           && String(checkOutcome.email || "").toLowerCase() === String(item.email || "").toLowerCase();
@@ -2212,6 +2299,8 @@ export class RegistrationService {
           password_setup_available: passwordSetup.available,
           password_setup_reason: passwordSetup.reason,
           user_id: item.user_id,
+          token_backup_available: Boolean(backupMatches),
+          token_backed_up_at: backupMatches ? backup.updated_at : "",
           ...accountSignals,
           status_check_state: checkState,
           status_check_error: checkError,
@@ -2428,6 +2517,13 @@ export class RegistrationService {
       ORDER BY created_at DESC LIMIT 1
     `).get(String(accountId));
     if (!job) throw Object.assign(new Error("注册账号不存在"), { status: 404 });
+    const backup = this.db.prepare(`
+      SELECT * FROM registered_account_backups
+      WHERE external_account_id = ? AND email = ? COLLATE NOCASE
+    `).get(String(accountId), job.email);
+    if (backup) {
+      return { id: accountId, email: backup.email, access_token: this.decryptAccountBackup(backup.access_token_encrypted) };
+    }
     const account = await this.client.getAccount(accountId);
     if (!account) throw Object.assign(new Error("账号已从本地账号池删除"), { status: 404 });
     if (String(account.email || "").toLowerCase() !== String(job.email || "").toLowerCase()) {
@@ -2435,7 +2531,33 @@ export class RegistrationService {
     }
     const accessToken = accessTokenFromAccount(account);
     if (!accessToken) throw Object.assign(new Error("这个账号尚未获取到 AT"), { status: 404 });
+    this.persistRegisteredAccountBackup(account, job);
     return { id: accountId, email: account.email, access_token: accessToken };
+  }
+
+  async exportRegisteredAccountBackups() {
+    const rows = this.db.prepare(`
+      SELECT * FROM registered_account_backups
+      ORDER BY email COLLATE NOCASE, external_account_id
+    `).all();
+    if (!rows.length) {
+      throw Object.assign(new Error("还没有可导出的 AT 本地备份，请先刷新已注册账号列表"), { status: 404 });
+    }
+    return {
+      format: "aliashub-chatgpt-token-backup",
+      version: 1,
+      exported_at: nowIso(),
+      accounts: rows.map((row) => ({
+        external_account_id: row.external_account_id,
+        email: row.email,
+        access_token: this.decryptAccountBackup(row.access_token_encrypted),
+        session_token: this.decryptAccountBackup(row.session_token_encrypted),
+        user_id: row.user_id,
+        account_id: row.account_id,
+        captured_at: row.captured_at,
+        updated_at: row.updated_at,
+      })),
+    };
   }
 
   async deleteRegisteredAccounts(input = {}) {
@@ -2481,6 +2603,7 @@ export class RegistrationService {
       this.db.transaction(() => {
         this.db.prepare(`DELETE FROM registered_account_metadata WHERE external_account_id IN (${placeholders})`).run(...deletedIds);
         this.db.prepare(`DELETE FROM registered_account_nfapi_links WHERE external_account_id IN (${placeholders})`).run(...deletedIds);
+        this.db.prepare(`DELETE FROM registered_account_backups WHERE external_account_id IN (${placeholders})`).run(...deletedIds);
       })();
     }
     return { requested: ids.length, deleted, failed };
@@ -2553,7 +2676,7 @@ export class RegistrationService {
       await this.scanAccount(account);
     }
     const exactRecipient = "(mail_messages.address_id = ? OR mail_messages.recipient_address = ? COLLATE NOCASE)";
-    const xunmailWithoutRecipient = `(
+    const providerMessageWithoutRecipient = `(
       mail_messages.account_id = ?
       AND mail_messages.address_id IS NULL
       AND TRIM(mail_messages.recipient_address) = ''
@@ -2561,11 +2684,12 @@ export class RegistrationService {
       AND COALESCE(NULLIF(TRIM(mail_messages.cc_recipients), ''), '[]') = '[]'
       AND mail_messages.received_at >= ?
     )`;
-    const addressScope = address.account_provider === "xunmail"
-      ? `(${exactRecipient} OR ${xunmailWithoutRecipient})`
+    const allowsUnassignedMessages = ["xunmail", "icloud"].includes(address.account_provider);
+    const addressScope = allowsUnassignedMessages
+      ? `(${exactRecipient} OR ${providerMessageWithoutRecipient})`
       : exactRecipient;
     const conditions = [addressScope];
-    const params = address.account_provider === "xunmail"
+    const params = allowsUnassignedMessages
       ? [address.id, email, address.account_id, address.created_at]
       : [address.id, email];
     if (query.subject_contains) { conditions.push("mail_messages.subject LIKE ?"); params.push(`%${query.subject_contains}%`); }

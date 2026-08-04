@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, Ban, Cable, Check, CircleStop, ClipboardCopy, Copy, Database, ExternalLink, Eye, EyeOff, Fingerprint, Globe2, KeyRound, ListChecks, LoaderCircle, Mail, Monitor, Network, Pencil, Play, RefreshCw, Save, ScrollText, Server, ShieldCheck, SlidersHorizontal, Trash2, UserPlus } from "lucide-react";
-import { api } from "../api.js";
+import { AlertTriangle, Ban, Cable, Check, CircleStop, ClipboardCopy, Copy, Database, Download, ExternalLink, Eye, EyeOff, Fingerprint, Globe2, KeyRound, ListChecks, LoaderCircle, Mail, Monitor, Network, Pencil, Play, RefreshCw, Save, ScrollText, Server, ShieldCheck, SlidersHorizontal, Trash2, UserPlus } from "lucide-react";
+import { api, appUrl } from "../api.js";
 import { Button, ConfirmDialog, EmptyState, FormField, IconButton, LoadingBlock, Modal, Segmented, StatusBadge, useToast } from "../components.jsx";
 import { copyText, formatDate, relativeTime } from "../utils.js";
 
@@ -556,6 +556,7 @@ export default function RegistrationPage({ refreshKey }) {
   const [selectedAccountIds, setSelectedAccountIds] = useState([]);
   const [copyingTokenId, setCopyingTokenId] = useState(null);
   const [copyingSelectedTokens, setCopyingSelectedTokens] = useState(false);
+  const [exportingTokenBackup, setExportingTokenBackup] = useState(false);
   const [checkingAccountSignals, setCheckingAccountSignals] = useState(false);
   const accountSignalRefreshBusy = useRef(false);
   const lastFocusedAccountRefreshAt = useRef(0);
@@ -1315,6 +1316,34 @@ export default function RegistrationPage({ refreshKey }) {
     }
   };
 
+  const exportTokenBackup = async () => {
+    setExportingTokenBackup(true);
+    try {
+      const response = await fetch(appUrl("/api/registration/accounts/token-backup"), {
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+      });
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || "AT 备份导出失败");
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `aliashub-at-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      URL.revokeObjectURL(url);
+      toast("AT 备份已下载到本地");
+    } catch (error) {
+      toast(error.message, "error");
+    } finally {
+      setExportingTokenBackup(false);
+    }
+  };
+
   const copyRegisteredAccount = async (item) => {
     if (!item?.email) {
       toast("账号目标已不存在，请刷新后重试", "error");
@@ -1434,7 +1463,7 @@ export default function RegistrationPage({ refreshKey }) {
       </>}
 
       {view === "accounts" && <section className="table-panel registration-account-panel">
-        <header className="panel-header"><div><h2>已注册账号</h2><p>使用原邮箱补设密码，也可通过可选的 SUB2 兼容服务添加账号 OAuth 授权</p></div><Button size="sm" icon={RefreshCw} loading={checkingAccountSignals} disabled={!accounts.items.length} title="重新读取当前账号的实时状态和套餐" onClick={refreshSelectedAccountSignals}>刷新并检测</Button></header>
+        <header className="panel-header"><div><h2>已注册账号</h2><p>使用原邮箱补设密码，也可通过可选的 SUB2 兼容服务添加账号 OAuth 授权</p></div><div className="toolbar-actions"><Button size="sm" icon={Download} loading={exportingTokenBackup} title="下载服务器已加密留存的全部账号令牌" onClick={exportTokenBackup}>下载 AT 备份</Button><Button size="sm" icon={RefreshCw} loading={checkingAccountSignals} disabled={!accounts.items.length} title="重新读取当前账号的实时状态和套餐" onClick={refreshSelectedAccountSignals}>刷新并检测</Button></div></header>
         {accounts.items.length ? <>
           {accountsError && <div className="inline-alert error"><AlertTriangle size={15} /><span>{accountsError}；当前保留上一次成功加载的账号列表。</span></div>}
           <div className="registration-bulk-bar">
@@ -1454,12 +1483,12 @@ export default function RegistrationPage({ refreshKey }) {
             <div className="data-table-wrap"><table className="data-table registration-accounts-table"><thead><tr><th className="select-column"><input type="checkbox" aria-label="选择当前分组全部注册账号" checked={allAccountsSelected} disabled={!accountIds.length} onChange={toggleAllAccounts} /></th><th>名称 / 分组</th><th>邮箱</th><th>密码</th><th>AccessToken (AT)</th><th>出口 IP</th><th>姓名 / 年龄</th><th>状态 / 类型</th><th>SUB2</th><th>创建时间</th><th aria-label="操作" /></tr></thead><tbody>{visibleAccountItems.map((item) => {
               const checked = selectedAccountIds.includes(item.id);
               const nfapiState = nfapiAccountState(item);
-              return <tr className={checked ? "selected-row" : ""} key={item.id}><td className="select-column"><input type="checkbox" aria-label={`选择 ${item.email}`} checked={checked} onChange={() => toggleAccount(item.id)} /></td><td><AccountNameGroup item={item} /></td><td><b>{item.email}</b></td><td><PasswordCell value={item.password} status={item.password_status} error={item.password_error} available={item.password_available} onCopy={() => copyText(item.password).then(() => toast("密码已复制"))} /></td><td><AccessTokenCell available={item.access_token_available} loading={copyingTokenId === item.id} onCopy={() => copyAccessToken(item)} /></td><td><code className="registration-exit-ip">{item.exit_ip || "未记录"}</code></td><td><div className="registration-identity"><b>{item.display_name || "-"}</b><small>{item.birth_date ? `${item.birth_date} · ${ageFromBirth(item.birth_date)} 岁` : "-"}</small></div></td><td><AccountSignalCell item={item} /></td><td><div className="registration-nfapi-status" title={nfapiState.error || nfapiState.accountId || nfapiState.label}><StatusBadge status={nfapiState.badge}>{nfapiState.label}</StatusBadge>{nfapiState.shortLived && <small>短期凭据</small>}{nfapiState.accountId && <code>#{nfapiState.accountId}</code>}{nfapiState.error && <small className="error">{nfapiState.error}</small>}</div></td><td><span className="muted-cell">{formatDate(item.created_at)}</span></td><td><div className="row-actions"><button className="registration-row-command" disabled={checkingAccountSignals} title="实时检测此账号状态和套餐" onClick={() => refreshAccountSignals([item.id])}><RefreshCw size={15} /></button><button className="registration-row-command" disabled={item.password_available || !item.password_setup_available} title={item.password_available ? "密码已配置" : item.password_setup_reason || "使用原邮箱设置密码"} onClick={() => openPasswordSetup(item)}><ShieldCheck size={15} /></button><button className="registration-row-command" title="通过 OAuth 添加或更新 SUB2" onClick={() => openNfapiImporter([item.id])}><Database size={15} /></button><button className="registration-row-command" title="编辑名称和分组" onClick={() => openAccountEditor(item)}><Pencil size={15} /></button><button className="registration-row-command" title={item.password_available ? "复制账号和密码" : "复制邮箱"} onClick={() => copyRegisteredAccount(item)}><ClipboardCopy size={15} /></button><button className="registration-row-command danger" title="删除本地账号" onClick={() => setDeleteTarget({ kind: "account", ids: [item.id], item })}><Trash2 size={15} /></button></div></td></tr>;
+              return <tr className={checked ? "selected-row" : ""} key={item.id}><td className="select-column"><input type="checkbox" aria-label={`选择 ${item.email}`} checked={checked} onChange={() => toggleAccount(item.id)} /></td><td><AccountNameGroup item={item} /></td><td><b>{item.email}</b></td><td><PasswordCell value={item.password} status={item.password_status} error={item.password_error} available={item.password_available} onCopy={() => copyText(item.password).then(() => toast("密码已复制"))} /></td><td><AccessTokenCell available={item.access_token_available || item.token_backup_available} loading={copyingTokenId === item.id} onCopy={() => copyAccessToken(item)} /></td><td><code className="registration-exit-ip">{item.exit_ip || "未记录"}</code></td><td><div className="registration-identity"><b>{item.display_name || "-"}</b><small>{item.birth_date ? `${item.birth_date} · ${ageFromBirth(item.birth_date)} 岁` : "-"}</small></div></td><td><AccountSignalCell item={item} /></td><td><div className="registration-nfapi-status" title={nfapiState.error || nfapiState.accountId || nfapiState.label}><StatusBadge status={nfapiState.badge}>{nfapiState.label}</StatusBadge>{nfapiState.shortLived && <small>短期凭据</small>}{nfapiState.accountId && <code>#{nfapiState.accountId}</code>}{nfapiState.error && <small className="error">{nfapiState.error}</small>}</div></td><td><span className="muted-cell">{formatDate(item.created_at)}</span></td><td><div className="row-actions"><button className="registration-row-command" disabled={checkingAccountSignals} title="实时检测此账号状态和套餐" onClick={() => refreshAccountSignals([item.id])}><RefreshCw size={15} /></button><button className="registration-row-command" disabled={item.password_available || !item.password_setup_available} title={item.password_available ? "密码已配置" : item.password_setup_reason || "使用原邮箱设置密码"} onClick={() => openPasswordSetup(item)}><ShieldCheck size={15} /></button><button className="registration-row-command" title="通过 OAuth 添加或更新 SUB2" onClick={() => openNfapiImporter([item.id])}><Database size={15} /></button><button className="registration-row-command" title="编辑名称和分组" onClick={() => openAccountEditor(item)}><Pencil size={15} /></button><button className="registration-row-command" title={item.password_available ? "复制账号和密码" : "复制邮箱"} onClick={() => copyRegisteredAccount(item)}><ClipboardCopy size={15} /></button><button className="registration-row-command danger" title="删除本地账号" onClick={() => setDeleteTarget({ kind: "account", ids: [item.id], item })}><Trash2 size={15} /></button></div></td></tr>;
             })}</tbody></table></div>
             <div className="registration-mobile-list">{visibleAccountItems.map((item) => {
               const checked = selectedAccountIds.includes(item.id);
               const nfapiState = nfapiAccountState(item);
-              return <article className={checked ? "selected" : ""} key={item.id}><header><input type="checkbox" aria-label={`选择 ${item.email}`} checked={checked} onChange={() => toggleAccount(item.id)} /><AccountSignalCell item={item} compact /><time>{formatDate(item.created_at)}</time></header><AccountNameGroup item={item} mobile /><button onClick={() => copyText(item.email).then(() => toast("邮箱已复制"))}>{item.email}<Copy size={14} /></button><PasswordCell value={item.password} status={item.password_status} error={item.password_error} available={item.password_available} onCopy={() => copyText(item.password).then(() => toast("密码已复制"))} /><AccessTokenCell available={item.access_token_available} loading={copyingTokenId === item.id} onCopy={() => copyAccessToken(item)} /><div className="registration-mobile-facts"><div className="registration-account-exit"><Globe2 size={14} /><span><small>出口 IP</small><b>{item.exit_ip || "未记录"}</b></span></div><div className="registration-account-exit"><Database size={14} /><span><small>SUB2</small><b>{nfapiState.label}{nfapiState.shortLived ? " · 短期凭据" : ""}</b></span></div></div>{nfapiState.error && <div className="inline-alert error"><AlertTriangle size={14} /><span>{nfapiState.error}</span></div>}<footer><span>{item.display_name || "未记录姓名"}</span><div className="row-actions"><button className="registration-row-command" disabled={checkingAccountSignals} title="实时检测此账号状态和套餐" onClick={() => refreshAccountSignals([item.id])}><RefreshCw size={15} /></button><button className="registration-row-command" disabled={item.password_available || !item.password_setup_available} title={item.password_available ? "密码已配置" : item.password_setup_reason || "使用原邮箱设置密码"} onClick={() => openPasswordSetup(item)}><ShieldCheck size={15} /></button><button className="registration-row-command" title="通过 OAuth 添加或更新 SUB2" onClick={() => openNfapiImporter([item.id])}><Database size={15} /></button><button className="registration-row-command" title="编辑名称和分组" onClick={() => openAccountEditor(item)}><Pencil size={15} /></button><Button size="sm" icon={ClipboardCopy} onClick={() => copyRegisteredAccount(item)}>{item.password_available ? "复制账号" : "复制邮箱"}</Button><button className="registration-row-command danger" title="删除本地账号" onClick={() => setDeleteTarget({ kind: "account", ids: [item.id], item })}><Trash2 size={15} /></button></div></footer></article>;
+              return <article className={checked ? "selected" : ""} key={item.id}><header><input type="checkbox" aria-label={`选择 ${item.email}`} checked={checked} onChange={() => toggleAccount(item.id)} /><AccountSignalCell item={item} compact /><time>{formatDate(item.created_at)}</time></header><AccountNameGroup item={item} mobile /><button onClick={() => copyText(item.email).then(() => toast("邮箱已复制"))}>{item.email}<Copy size={14} /></button><PasswordCell value={item.password} status={item.password_status} error={item.password_error} available={item.password_available} onCopy={() => copyText(item.password).then(() => toast("密码已复制"))} /><AccessTokenCell available={item.access_token_available || item.token_backup_available} loading={copyingTokenId === item.id} onCopy={() => copyAccessToken(item)} /><div className="registration-mobile-facts"><div className="registration-account-exit"><Globe2 size={14} /><span><small>出口 IP</small><b>{item.exit_ip || "未记录"}</b></span></div><div className="registration-account-exit"><Database size={14} /><span><small>SUB2</small><b>{nfapiState.label}{nfapiState.shortLived ? " · 短期凭据" : ""}</b></span></div></div>{nfapiState.error && <div className="inline-alert error"><AlertTriangle size={14} /><span>{nfapiState.error}</span></div>}<footer><span>{item.display_name || "未记录姓名"}</span><div className="row-actions"><button className="registration-row-command" disabled={checkingAccountSignals} title="实时检测此账号状态和套餐" onClick={() => refreshAccountSignals([item.id])}><RefreshCw size={15} /></button><button className="registration-row-command" disabled={item.password_available || !item.password_setup_available} title={item.password_available ? "密码已配置" : item.password_setup_reason || "使用原邮箱设置密码"} onClick={() => openPasswordSetup(item)}><ShieldCheck size={15} /></button><button className="registration-row-command" title="通过 OAuth 添加或更新 SUB2" onClick={() => openNfapiImporter([item.id])}><Database size={15} /></button><button className="registration-row-command" title="编辑名称和分组" onClick={() => openAccountEditor(item)}><Pencil size={15} /></button><Button size="sm" icon={ClipboardCopy} onClick={() => copyRegisteredAccount(item)}>{item.password_available ? "复制账号" : "复制邮箱"}</Button><button className="registration-row-command danger" title="删除本地账号" onClick={() => setDeleteTarget({ kind: "account", ids: [item.id], item })}><Trash2 size={15} /></button></div></footer></article>;
             })}</div>
           </> : <EmptyState icon={KeyRound} title="这个分组还没有账号" action={<Button onClick={() => changeAccountGroupFilter("all")}>查看全部账号</Button>} />}
           <div className="table-footer"><span>当前 {visibleAccountItems.length} 个，共 {accounts.total} 个注册账号</span></div>

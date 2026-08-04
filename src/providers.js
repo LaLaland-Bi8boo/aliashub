@@ -32,11 +32,23 @@ export const MAIL_PROVIDERS = {
     supportsOfficialAliases: false,
     supportsPlusAliases: true,
   },
+  icloud: {
+    id: "icloud",
+    name: "iCloud",
+    accountLabel: "iCloud 邮箱",
+    description: "粘贴 iCloud 基础邮箱与取件 URL",
+    shortDescription: "取件链接",
+    oauthBase: null,
+    popupName: null,
+    supportsOfficialAliases: false,
+    supportsPlusAliases: true,
+  },
 };
 
 export function normalizeProvider(value) {
   if (value === "google") return "google";
   if (value === "xunmail") return "xunmail";
+  if (value === "icloud") return "icloud";
   return "microsoft";
 }
 
