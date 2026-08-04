@@ -294,6 +294,7 @@ def test_browser_registration_flow_starts_from_chatgpt_nextauth(monkeypatch):
     [
         "验证码页未找到可填写输入框",
         "验证码页未找到 Continue 按钮",
+        "验证码页提交后未跳转",
     ],
 )
 def test_browser_registration_otp_dom_failure_uses_same_context_api_fallback(

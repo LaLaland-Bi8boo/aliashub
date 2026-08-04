@@ -5588,6 +5588,7 @@ def _is_registration_otp_dom_failure(result: dict) -> bool:
         for marker in (
             "验证码页未找到可填写输入框",
             "验证码页未找到 Continue 按钮",
+            "验证码页提交后未跳转",
         )
     )
 
@@ -7662,7 +7663,7 @@ def _browser_registration_flow(
                 else _submit_otp_via_page(page, code, log, cancel_check=cancel_check)
             )
             if _is_registration_otp_dom_failure(otp_resp):
-                log("验证码页 DOM 提交不可用，改用同一浏览器会话 API 校验")
+                log("验证码页提交未推进，改用同一浏览器会话 API 校验")
                 try:
                     _dump_debug(page, "chatgpt_registration_otp_dom_missing")
                 except Exception as exc:
@@ -7699,7 +7700,7 @@ def _browser_registration_flow(
                     otp_resp = {
                         **api_resp,
                         "ok": False,
-                        "text": f"验证码页 DOM 提交不可用；同浏览器 API 校验失败: {api_text or 'unknown error'}",
+                        "text": f"验证码页提交未推进；同浏览器 API 校验失败: {api_text or 'unknown error'}",
                     }
             log(f"验证码页提交状态: {otp_resp.get('status', 0)}")
             if not otp_resp.get("ok"):
