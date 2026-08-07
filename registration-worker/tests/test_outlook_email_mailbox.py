@@ -22,6 +22,7 @@ class FakeSession:
         self.responses = list(responses)
         self.headers = {}
         self.proxies = {}
+        self.trust_env = True
         self.verify = True
         self.calls = []
 
@@ -255,3 +256,40 @@ def test_outlook_email_provider_definition_and_factory_are_wired():
     assert definition.driver_type == "outlook_email_api"
     assert isinstance(mailbox, OutlookEmailMailbox)
     assert mailbox.get_email().email == "fixed@outlook.com"
+
+
+def test_internal_alias_hub_mailbox_does_not_inherit_registration_proxy(monkeypatch):
+    session = FakeSession([FakeResponse({"success": True, "emails": []})])
+    monkeypatch.setattr("requests.Session", lambda: session)
+
+    mailbox = OutlookEmailMailbox(
+        api_url="http://aliashub:4180",
+        api_key="fake-api-key",
+        fixed_email="fixed@outlook.com",
+        proxy="http://registration-proxy.example:8080",
+    )
+    mailbox.get_current_ids_strict(mailbox.get_email())
+
+    assert mailbox.direct_internal_api is True
+    assert mailbox.proxy is None
+    assert session.proxies == {}
+    assert session.trust_env is False
+    assert session.calls[0]["url"] == "http://aliashub:4180/api/external/emails"
+
+
+def test_public_outlook_email_api_keeps_the_registration_proxy(monkeypatch):
+    session = FakeSession([FakeResponse({"success": True, "emails": []})])
+    monkeypatch.setattr("requests.Session", lambda: session)
+    proxy = "http://registration-proxy.example:8080"
+
+    mailbox = OutlookEmailMailbox(
+        api_url="https://mail.example.test",
+        api_key="fake-api-key",
+        fixed_email="fixed@outlook.com",
+        proxy=proxy,
+    )
+    mailbox.get_current_ids_strict(mailbox.get_email())
+
+    assert mailbox.direct_internal_api is False
+    assert session.proxies == {"http": proxy, "https": proxy}
+    assert session.trust_env is True
