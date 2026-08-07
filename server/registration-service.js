@@ -22,6 +22,7 @@ import {
   materializeProxySession,
   parseProxyPool,
   proxyMetadata,
+  proxyReference,
   redactProxySecrets,
   resolveJobProxies,
   safeProxySamples,
@@ -942,15 +943,19 @@ function accountStatusSignals(item = {}, persistedOutcome = null) {
     overview.plus_trial_eligibility,
     item.plus_trial_eligibility,
   ), "unknown");
-  const plusTrialEligibility = new Set(["eligible", "ineligible"]).has(rawPlusTrialEligibility)
-    ? rawPlusTrialEligibility : "unknown";
-  const plusTrialCampaignId = safeAccountCheckText(firstRemoteText(
-    overview.plus_trial_campaign_id,
-    item.plus_trial_campaign_id,
-  ), 100);
   const plusTrialEligibilitySource = safeAccountCheckText(firstRemoteText(
     overview.plus_trial_eligibility_source,
     item.plus_trial_eligibility_source,
+  ), 100);
+  const trustedNegativeTrialSource = /(?:registration-browser|registration-page|\/proxy)(?:[/:+]|$)/i
+    .test(plusTrialEligibilitySource);
+  const plusTrialEligibility = rawPlusTrialEligibility === "eligible"
+    ? "eligible"
+    : (rawPlusTrialEligibility === "ineligible" && trustedNegativeTrialSource
+      ? "ineligible" : "unknown");
+  const plusTrialCampaignId = safeAccountCheckText(firstRemoteText(
+    overview.plus_trial_campaign_id,
+    item.plus_trial_campaign_id,
   ), 100);
   const plusTrialEligibilityReason = safeAccountCheckText(firstRemoteText(
     overview.plus_trial_eligibility_reason,
@@ -1763,10 +1768,21 @@ export class RegistrationService {
       const now = nowIso();
       const result = this.db.prepare(`
         INSERT INTO registration_jobs (
-          account_id, address_id, base_address_id, email, status, stage, browser_mode, proxy_label, fingerprint_id,
+          account_id, address_id, base_address_id, email, status, stage, browser_mode, proxy_label, proxy_ref, fingerprint_id,
           message, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, 'queued', 'queued', ?, ?, ?, '正在提交注册任务', ?, ?)
-      `).run(account.id, address.id, base.id, address.address, browserMode, maskProxy(proxy), crypto.randomUUID().slice(0, 12), now, now);
+        ) VALUES (?, ?, ?, ?, 'queued', 'queued', ?, ?, ?, ?, '正在提交注册任务', ?, ?)
+      `).run(
+        account.id,
+        address.id,
+        base.id,
+        address.address,
+        browserMode,
+        maskProxy(proxy),
+        proxyReference(proxyTemplate),
+        crypto.randomUUID().slice(0, 12),
+        now,
+        now,
+      );
       const jobId = Number(result.lastInsertRowid);
       try {
         const task = await this.client.createTask({
@@ -1849,9 +1865,9 @@ export class RegistrationService {
       const now = nowIso();
       const result = this.db.prepare(`
         INSERT INTO registration_jobs (
-          account_id, address_id, base_address_id, email, status, stage, browser_mode, proxy_label, fingerprint_id,
+          account_id, address_id, base_address_id, email, status, stage, browser_mode, proxy_label, proxy_ref, fingerprint_id,
           message, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, 'queued', 'queued', ?, ?, ?, '正在提交链接取件注册任务', ?, ?)
+        ) VALUES (?, ?, ?, ?, 'queued', 'queued', ?, ?, ?, ?, '正在提交链接取件注册任务', ?, ?)
       `).run(
         entry.sourceAccountId || null,
         entry.sourceAddressId || null,
@@ -1859,6 +1875,7 @@ export class RegistrationService {
         entry.email,
         browserMode,
         maskProxy(proxy),
+        proxyReference(proxyTemplate),
         crypto.randomUUID().slice(0, 12),
         now,
         now,
@@ -2210,11 +2227,16 @@ export class RegistrationService {
     if (!proxyLabel) {
       throw Object.assign(new Error(`注册记录缺少原代理信息，拒绝${operationLabel}`), { status: 409 });
     }
-    const matches = this.getProxyPool().filter((proxy) => maskProxy(proxy) === proxyLabel);
-    if (matches.length !== 1) {
+    const route = statusCheckProxyRoute(
+      proxyLabel,
+      this.getProxyPool(),
+      new Set(),
+      job?.proxy_ref,
+    );
+    if (!route.primary) {
       throw Object.assign(new Error(`无法唯一还原注册时使用的代理，拒绝${operationLabel}`), { status: 409 });
     }
-    return matches[0];
+    return route.primary;
   }
 
   passwordSetupProxy(job) {
@@ -2420,7 +2442,12 @@ export class RegistrationService {
         || this.accountStatusRefreshAttempts.has(key)) {
         continue;
       }
-      const proxyRoute = statusCheckProxyRoute(job?.proxy_label, proxyPool, usedProxySessions);
+      const proxyRoute = statusCheckProxyRoute(
+        job?.proxy_label,
+        proxyPool,
+        usedProxySessions,
+        job?.proxy_ref,
+      );
       candidates.push({ id, email, key, proxyRoute, signals });
       if (candidates.length >= ACCOUNT_STATUS_REFRESH_BATCH_SIZE) break;
     }
@@ -2750,7 +2777,7 @@ export class RegistrationService {
     if (!skipNfapiSync) await this.syncLatestNfapiCredentials(selected);
     const placeholders = ids.map(() => "?").join(",");
     const jobs = this.db.prepare(`
-      SELECT external_account_id, email, proxy_label
+      SELECT external_account_id, email, proxy_label, proxy_ref
       FROM registration_jobs
       WHERE external_account_id IN (${placeholders}) AND status = 'completed'
       ORDER BY created_at DESC, id DESC
@@ -2771,6 +2798,7 @@ export class RegistrationService {
         jobById.get(id)?.proxy_label,
         proxyPool,
         usedProxySessions,
+        jobById.get(id)?.proxy_ref,
       ));
     }
     const refresh = await refreshPlansWithProxyReview(this.client, ids, proxyRoutesById);

@@ -9703,23 +9703,70 @@ PLUS_TRIAL_CAMPAIGN_ID = "plus-1-month-free"
 
 
 def _normalize_campaign_id(value: Any) -> str:
-    return str(value or "").strip().lower().replace("_", "-")
+    return re.sub(
+        r"-+",
+        "-",
+        str(value or "").strip().lower().replace("_", "-").replace(" ", "-"),
+    )
+
+
+def _is_plus_trial_campaign_id(value: Any) -> bool:
+    normalized = _normalize_campaign_id(value)
+    if normalized == PLUS_TRIAL_CAMPAIGN_ID:
+        return True
+    return "plus" in normalized and any(marker in normalized for marker in (
+        "1-month-free",
+        "one-month-free",
+        "free-1-month",
+        "free-one-month",
+        "1-month-trial",
+        "one-month-trial",
+    ))
+
+
+def _explicit_offer_eligibility(value: Any) -> bool | None:
+    if not isinstance(value, dict):
+        return None
+    flags = [
+        value.get(key)
+        for key in (
+            "active", "eligible", "is_eligible", "isEligible", "enabled", "epl_enabled",
+        )
+        if isinstance(value.get(key), bool)
+    ]
+    if any(flags):
+        return True
+    if flags:
+        return False
+    return None
 
 
 def _contains_campaign_id(value: Any, campaign_id: str) -> bool:
     target = _normalize_campaign_id(campaign_id)
     if isinstance(value, dict):
+        if _explicit_offer_eligibility(value) is False:
+            return False
         for key, nested in value.items():
-            if _normalize_campaign_id(key) == target:
+            if (
+                _normalize_campaign_id(key) == target
+                or (target == PLUS_TRIAL_CAMPAIGN_ID and _is_plus_trial_campaign_id(key))
+            ):
                 return True
-            if key in {"id", "campaign_id", "promo_campaign_id"} \
-                    and _normalize_campaign_id(nested) == target:
+            if key in {
+                "id", "offer_id", "campaign_id", "promo_campaign_id", "default_offer_id",
+            } and (
+                _normalize_campaign_id(nested) == target
+                or (target == PLUS_TRIAL_CAMPAIGN_ID and _is_plus_trial_campaign_id(nested))
+            ):
                 return True
             if _contains_campaign_id(nested, target):
                 return True
     elif isinstance(value, (list, tuple, set)):
         return any(_contains_campaign_id(item, target) for item in value)
-    elif _normalize_campaign_id(value) == target:
+    elif (
+        _normalize_campaign_id(value) == target
+        or (target == PLUS_TRIAL_CAMPAIGN_ID and _is_plus_trial_campaign_id(value))
+    ):
         return True
     return False
 
@@ -9727,31 +9774,67 @@ def _contains_campaign_id(value: Any, campaign_id: str) -> bool:
 def _plus_trial_eligibility(
     accounts_check: dict[str, Any] | None,
     account_id: str,
+    *,
+    allow_ineligible: bool = True,
+    source: str = "backend-api/accounts/check",
 ) -> dict[str, str]:
-    source = "backend-api/accounts/check"
-    evidence_path = "accounts[account_id].eligible_promo_campaigns"
+    default_evidence_path = "accounts[account_id].trial_offer_fields"
     accounts = accounts_check.get("accounts") if isinstance(accounts_check, dict) else None
     node = accounts.get(account_id) if isinstance(accounts, dict) else None
-    if not isinstance(node, dict) or "eligible_promo_campaigns" not in node:
+    if not isinstance(node, dict):
         return {
             "plus_trial_eligibility": "unknown",
             "plus_trial_campaign_id": "",
-            "plus_trial_eligibility_source": source if isinstance(node, dict) else "",
+            "plus_trial_eligibility_source": "",
             "plus_trial_eligibility_reason": "官方资格字段未返回，需重新检测",
-            "plus_trial_eligibility_evidence_path": evidence_path,
+            "plus_trial_eligibility_evidence_path": default_evidence_path,
         }
 
-    campaigns = node.get("eligible_promo_campaigns")
-    eligible = _contains_campaign_id(campaigns, PLUS_TRIAL_CAMPAIGN_ID)
-    return {
-        "plus_trial_eligibility": "eligible" if eligible else "ineligible",
-        "plus_trial_campaign_id": PLUS_TRIAL_CAMPAIGN_ID if eligible else "",
-        "plus_trial_eligibility_source": source,
-        "plus_trial_eligibility_reason": (
-            "官方接口确认可领取 1 个月 Plus 免费试用"
-            if eligible else "官方接口未提供 1 个月 Plus 免费试用活动"
+    candidates = [
+        (
+            "accounts[account_id].eligible_promo_campaigns",
+            "eligible_promo_campaigns",
         ),
-        "plus_trial_eligibility_evidence_path": evidence_path,
+        ("accounts[account_id].eligible_offers", "eligible_offers"),
+        ("accounts[account_id].default_offer_id", "default_offer_id"),
+        ("accounts[account_id].offers", "offers"),
+    ]
+    observed_paths: list[str] = []
+    for evidence_path, field_name in candidates:
+        if field_name not in node:
+            continue
+        observed_paths.append(evidence_path)
+        if _contains_campaign_id(node.get(field_name), PLUS_TRIAL_CAMPAIGN_ID):
+            return {
+                "plus_trial_eligibility": "eligible",
+                "plus_trial_campaign_id": PLUS_TRIAL_CAMPAIGN_ID,
+                "plus_trial_eligibility_source": source,
+                "plus_trial_eligibility_reason": "官方接口确认可领取 1 个月 Plus 免费试用",
+                "plus_trial_eligibility_evidence_path": evidence_path,
+            }
+
+    if not observed_paths:
+        return {
+            "plus_trial_eligibility": "unknown",
+            "plus_trial_campaign_id": "",
+            "plus_trial_eligibility_source": source,
+            "plus_trial_eligibility_reason": "官方资格字段未返回，需重新检测",
+            "plus_trial_eligibility_evidence_path": default_evidence_path,
+        }
+    if not allow_ineligible:
+        return {
+            "plus_trial_eligibility": "unknown",
+            "plus_trial_campaign_id": "",
+            "plus_trial_eligibility_source": source,
+            "plus_trial_eligibility_reason": "本次仅通过服务器直连检测，不能否定地域试用资格",
+            "plus_trial_eligibility_evidence_path": observed_paths[0],
+        }
+    return {
+        "plus_trial_eligibility": "ineligible",
+        "plus_trial_campaign_id": "",
+        "plus_trial_eligibility_source": source,
+        "plus_trial_eligibility_reason": "原注册代理下的官方接口未提供 1 个月 Plus 免费试用活动",
+        "plus_trial_eligibility_evidence_path": observed_paths[0],
     }
 
 
@@ -9765,6 +9848,8 @@ def _confirmed_subscription_details(
     usage: dict[str, Any] | None = None,
     accounts_check: dict[str, Any] | None = None,
     subscriptions: dict[str, Any] | None = None,
+    trial_negative_authoritative: bool = True,
+    trial_eligibility_source: str = "backend-api/accounts/check",
 ) -> dict[str, Any]:
     raw_status = str(observation.get("plan_code_raw") or "")
     status = str(observation.get("plan_family") or "unknown")
@@ -9808,7 +9893,12 @@ def _confirmed_subscription_details(
         "accounts_check": accounts_check,
         "subscriptions": subscriptions,
     }
-    details.update(_plus_trial_eligibility(accounts_check, account_id))
+    details.update(_plus_trial_eligibility(
+        accounts_check,
+        account_id,
+        allow_ineligible=trial_negative_authoritative,
+        source=trial_eligibility_source,
+    ))
     return details
 
 
@@ -9829,6 +9919,11 @@ def fetch_subscription_status_details(account: Account, proxy: Optional[str] = N
     subscriptions_data = None
     accounts_signal: dict[str, Any] = {}
     subscriptions_observation = None
+    trial_negative_authoritative = bool(proxy)
+    trial_eligibility_source = (
+        "backend-api/accounts/check/proxy"
+        if proxy else "backend-api/accounts/check/direct"
+    )
 
     if account_id:
         try:
@@ -9883,6 +9978,8 @@ def fetch_subscription_status_details(account: Account, proxy: Optional[str] = N
             plan_conflict=conflict,
             accounts_check=accounts_check_data,
             subscriptions=subscriptions_data,
+            trial_negative_authoritative=trial_negative_authoritative,
+            trial_eligibility_source=trial_eligibility_source,
         )
     if subscriptions_paid:
         conflict = bool(accounts_signal.get("free_inactive"))
@@ -9893,6 +9990,8 @@ def fetch_subscription_status_details(account: Account, proxy: Optional[str] = N
             plan_conflict=conflict,
             accounts_check=accounts_check_data,
             subscriptions=subscriptions_data,
+            trial_negative_authoritative=trial_negative_authoritative,
+            trial_eligibility_source=trial_eligibility_source,
         )
     if (
         accounts_signal.get("free_inactive")
@@ -9908,6 +10007,8 @@ def fetch_subscription_status_details(account: Account, proxy: Optional[str] = N
             plans=authoritative_plans,
             accounts_check=accounts_check_data,
             subscriptions=subscriptions_data,
+            trial_negative_authoritative=trial_negative_authoritative,
+            trial_eligibility_source=trial_eligibility_source,
         )
 
     usage_data = None
@@ -9935,6 +10036,8 @@ def fetch_subscription_status_details(account: Account, proxy: Optional[str] = N
             usage=usage_data,
             accounts_check=accounts_check_data,
             subscriptions=subscriptions_data,
+            trial_negative_authoritative=trial_negative_authoritative,
+            trial_eligibility_source=trial_eligibility_source,
         )
 
     me_data = None
@@ -9987,6 +10090,8 @@ def fetch_subscription_status_details(account: Account, proxy: Optional[str] = N
             usage=usage_data,
             accounts_check=accounts_check_data,
             subscriptions=subscriptions_data,
+            trial_negative_authoritative=trial_negative_authoritative,
+            trial_eligibility_source=trial_eligibility_source,
         )
 
     structured_errors = [

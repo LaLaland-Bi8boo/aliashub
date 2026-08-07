@@ -117,6 +117,11 @@ def test_browser_registration_mapper_accepts_completed_registration_without_code
         "workspace_id": "",
         "cookies": "{\"login_session\":\"yes\"}",
         "profile": {},
+        "plus_trial_eligibility": "eligible",
+        "plus_trial_campaign_id": "plus-1-month-free",
+        "plus_trial_eligibility_source": "registration-browser/visible-offer",
+        "plus_trial_eligibility_reason": "registration page offer",
+        "plus_trial_eligibility_evidence_path": "registration_page.visible_text",
     })
 
     assert mapped.email == "user@example.com"
@@ -124,6 +129,8 @@ def test_browser_registration_mapper_accepts_completed_registration_without_code
     assert mapped.user_id == ""
     assert mapped.token == ""
     assert mapped.extra["access_token"] == ""
+    assert mapped.extra["account_overview"]["plus_trial_eligibility"] == "eligible"
+    assert mapped.extra["account_overview"]["plus_trial_campaign_id"] == "plus-1-month-free"
     assert mapped.extra["cookies"] == "{\"login_session\":\"yes\"}"
 
 
@@ -554,6 +561,77 @@ def test_post_signup_legal_gate_must_disappear_after_continue(monkeypatch):
         browser_register_module._handle_post_signup_onboarding(FakePage(), lambda message: None, timeout=2)
 
     assert dumped == ["chatgpt_post_signup_gate_stuck"]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Try Plus free for 1 month",
+        "Get Plus one month free trial",
+        "Plus を 1ヶ月間無料で利用できます",
+        "Plus 免费 1 个月",
+    ],
+)
+def test_registration_page_detects_official_one_month_plus_offer(text):
+    assert browser_register_module._plus_trial_offer_in_page_text(text) is True
+
+
+def test_registration_browser_reads_trial_offer_fields_with_same_browser(monkeypatch):
+    calls = []
+
+    def browser_fetch(page, url, **kwargs):
+        calls.append((page, url, kwargs))
+        return {
+            "ok": True,
+            "status": 200,
+            "data": {
+                "accounts": {
+                    "acct_123": {
+                        "eligible_offers": [
+                            {"offer_id": "plus-1-month-free", "epl_enabled": True},
+                        ],
+                    },
+                },
+            },
+        }
+
+    monkeypatch.setattr(browser_register_module, "_browser_fetch", browser_fetch)
+    page = object()
+
+    result = browser_register_module._registration_plus_trial_eligibility(
+        page,
+        {"account_id": "acct_123", "access_token": "private-at"},
+        {},
+    )
+
+    assert result["plus_trial_eligibility"] == "eligible"
+    assert result["plus_trial_eligibility_source"] == "registration-browser/accounts/check"
+    assert result["plus_trial_eligibility_evidence_path"].endswith("eligible_offers")
+    assert len(calls) == 1
+    assert calls[0][0] is page
+    assert calls[0][2]["headers"]["authorization"] == "Bearer private-at"
+
+
+def test_visible_registration_offer_wins_over_empty_api_result(monkeypatch):
+    monkeypatch.setattr(
+        browser_register_module,
+        "_browser_fetch",
+        lambda *args, **kwargs: {
+            "ok": True,
+            "status": 200,
+            "data": {"accounts": {"acct_123": {"eligible_promo_campaigns": {}}}},
+        },
+    )
+
+    result = browser_register_module._registration_plus_trial_eligibility(
+        object(),
+        {"account_id": "acct_123", "access_token": "private-at"},
+        {"plus_trial_page_offer_seen": True},
+    )
+
+    assert result["plus_trial_eligibility"] == "eligible"
+    assert result["plus_trial_eligibility_source"] == "registration-browser/visible-offer"
+    assert result["plus_trial_eligibility_evidence_path"] == "registration_page.visible_text"
 
 
 def test_browser_registration_email_only_stops_when_phone_is_required(monkeypatch):

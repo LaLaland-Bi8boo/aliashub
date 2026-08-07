@@ -586,6 +586,12 @@ test("registration integration generates isolated addresses and exposes mailbox 
       assert.equal(client.created[0].extra.set_password_after_registration, false);
       assert.equal(client.created[0].extra.auto_continue_post_signup, true);
       assert.equal(response.body.items[0].proxy_label, "http://***@gate-us.kookeey.info:1000");
+      const storedProxyRefs = response.body.items.map((item) => db.prepare(
+        "SELECT proxy_ref FROM registration_jobs WHERE id = ?",
+      ).get(item.id).proxy_ref);
+      assert.equal(new Set(storedProxyRefs).size, 1);
+      assert.match(storedProxyRefs[0], /^[a-f0-9]{64}$/);
+      assert.equal(Object.hasOwn(response.body.items[0], "proxy_ref"), false);
       const serializedJobs = JSON.stringify(response.body);
       assert.doesNotMatch(serializedJobs, /kookeey-user|base-secret|50663419/i);
       materializedPasswords.forEach((password) => assert.equal(serializedJobs.includes(password), false));

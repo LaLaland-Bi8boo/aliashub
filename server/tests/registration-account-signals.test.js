@@ -74,6 +74,7 @@ test("registered accounts require the same remote id and email and expose normal
         checked_at: checkedAt,
         check_source: "backend-api/me",
         plus_trial_eligibility: "ineligible",
+        plus_trial_eligibility_source: "backend-api/accounts/check/proxy",
         password_status: "not_configured",
       },
       credentials: [{ key: "access_token", value: "private-disabled-token" }],
@@ -92,6 +93,7 @@ test("registered accounts require the same remote id and email and expose normal
         valid: true,
         check_source: "backend-api/me",
         plus_trial_eligibility: "ineligible",
+        plus_trial_eligibility_source: "backend-api/accounts/check/proxy",
         password_status: "not_configured",
       },
       display_summary: { status: { checked_at: checkedAt } },
@@ -195,6 +197,42 @@ test("registered accounts require the same remote id and email and expose normal
   assert.equal(serialized.includes('"credentials"'), false);
 });
 
+test("legacy direct negative trial results are downgraded to unknown", async (t) => {
+  const db = testDatabase(t);
+  addCompletedRegistration(db, 211, "legacy-direct@example.com");
+  const service = new RegistrationService({
+    db,
+    graph: {},
+    client: {
+      async listAccounts() {
+        return { items: [{
+          id: 211,
+          platform: "chatgpt",
+          email: "legacy-direct@example.com",
+          lifecycle_status: "registered",
+          validity_status: "valid",
+          display_status: "registered",
+          plan_state: "free",
+          plan_name: "free",
+          overview: {
+            valid: true,
+            plus_trial_eligibility: "ineligible",
+            plus_trial_eligibility_source: "backend-api/accounts/check",
+            password_status: "not_configured",
+          },
+          credentials: [{ key: "access_token", value: "private-token" }],
+          created_at: nowIso(),
+        }] };
+      },
+    },
+  });
+
+  const result = await service.listRegisteredAccounts({ refreshUnchecked: false });
+
+  assert.equal(result.items[0].plus_trial_eligibility, "unknown");
+  assert.equal(result.items[0].status_check_required, true);
+});
+
 test("registered account list exposes only completed NFapi imports", async (t) => {
   const db = testDatabase(t);
   const now = nowIso();
@@ -288,6 +326,7 @@ test("unchecked matched accounts refresh once, re-list, and never send mismatche
                 checked_at: detectedAt,
                 check_source: "backend-api/me",
                 plus_trial_eligibility: "ineligible",
+                plus_trial_eligibility_source: "backend-api/accounts/check/proxy",
               } : {}),
             },
             credentials: { access_token: { value: "private-object-token" } },
@@ -334,6 +373,7 @@ test("unchecked matched accounts refresh once, re-list, and never send mismatche
             status_source: "backend-api/accounts/check+subscriptions",
             status_checked_at: detectedAt,
             plus_trial_eligibility: "ineligible",
+            plus_trial_eligibility_source: "backend-api/accounts/check/proxy",
           }],
           timed_out: 0,
         };
@@ -392,7 +432,10 @@ test("known accounts refresh once when official Plus trial eligibility is unknow
               valid: true,
               checked_at: checkedAt,
               check_source: "backend-api/accounts/check",
-              ...(refreshed ? { plus_trial_eligibility: "ineligible" } : {}),
+              ...(refreshed ? {
+                plus_trial_eligibility: "ineligible",
+                plus_trial_eligibility_source: "backend-api/accounts/check/proxy",
+              } : {}),
             },
             credentials: [{ key: "access_token", value: "private-token" }],
           }],
@@ -412,6 +455,7 @@ test("known accounts refresh once when official Plus trial eligibility is unknow
             account_type_raw: "free",
             type_observed: true,
             plus_trial_eligibility: "ineligible",
+            plus_trial_eligibility_source: "backend-api/accounts/check/proxy",
             status_source: "backend-api/accounts/check",
             status_checked_at: checkedAt,
           }],

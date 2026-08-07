@@ -6,6 +6,7 @@ import {
   materializeProxySession,
   parseProxyPool,
   proxyMetadata,
+  proxyReference,
   redactProxySecrets,
   resolveJobProxies,
   safeProxySamples,
@@ -78,6 +79,40 @@ test("registration proxy helpers materialize independent Kookeey sessions", () =
   assert.equal(route.primary, stickyProxy);
   assert.notEqual(route.fallback, stickyProxy);
   assert.deepEqual(statusCheckProxyRoute("直连", [stickyProxy]), { primary: "", fallback: "" });
+});
+
+test("status checks recover the exact saved proxy from a non-secret reference", () => {
+  const japan = "http://proxy-user:base-secret-JP-11111111-30m@gate-us.kookeey.info:1000";
+  const unitedStates = "http://proxy-user:base-secret-US-22222222-30m@gate-us.kookeey.info:1000";
+  assert.equal(maskProxy(japan), maskProxy(unitedStates));
+
+  const route = statusCheckProxyRoute(
+    maskProxy(japan),
+    [unitedStates, japan],
+    new Set(),
+    proxyReference(japan),
+  );
+
+  assert.equal(route.primary, japan);
+  assert.notEqual(route.fallback, japan);
+  assert.equal(proxyMetadata(route.fallback).country_code, "JP");
+  assert.match(proxyReference(japan), /^[a-f0-9]{64}$/);
+  assert.equal(proxyReference(japan).includes("base-secret"), false);
+});
+
+test("legacy jobs recover a shared Kookeey region but reject ambiguous regions", () => {
+  const firstJapan = "http://proxy-user:base-secret-JP-11111111-30m@gate-us.kookeey.info:1000";
+  const secondJapan = "http://proxy-user:base-secret-JP-22222222-30m@gate-us.kookeey.info:1000";
+  const unitedStates = "http://proxy-user:base-secret-US-33333333-30m@gate-us.kookeey.info:1000";
+
+  assert.equal(
+    statusCheckProxyRoute(maskProxy(firstJapan), [firstJapan, secondJapan]).primary,
+    firstJapan,
+  );
+  assert.deepEqual(
+    statusCheckProxyRoute(maskProxy(firstJapan), [firstJapan, unitedStates]),
+    { primary: "", fallback: "" },
+  );
 });
 
 test("registration proxy selection and inspection samples preserve service behavior", () => {

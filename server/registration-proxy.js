@@ -89,6 +89,12 @@ export function maskProxy(value) {
   } catch { return "已配置代理"; }
 }
 
+export function proxyReference(value) {
+  const proxy = String(value || "").trim();
+  if (!proxy) return "";
+  return crypto.createHash("sha256").update(proxy).digest("hex");
+}
+
 export function redactProxySecrets(value) {
   return String(value ?? "")
     .replace(/\b([a-z][a-z0-9+.-]*:(?:\\?\/){2})([^\s/?#@]+)@/gi, "$1***@")
@@ -173,10 +179,39 @@ export function materializeProxySession(value, usedSessions = new Set()) {
   throw new Error("动态代理会话生成失败");
 }
 
-export function statusCheckProxyRoute(proxyLabel, proxyPool, usedSessions = new Set()) {
+function legacyKookeeyAffinity(value) {
+  const metadata = proxyMetadata(value);
+  if (!metadata?.country_code) return "";
+  try {
+    const parsed = new URL(value);
+    return `${parsed.protocol}//${parsed.username}@${parsed.host}/${metadata.country_code}`;
+  } catch {
+    return "";
+  }
+}
+
+export function statusCheckProxyRoute(
+  proxyLabel,
+  proxyPool,
+  usedSessions = new Set(),
+  proxyRef = "",
+) {
   const label = String(proxyLabel || "").trim();
   if (!label || label === "直连") return { primary: "", fallback: "" };
-  const matches = proxyPool.filter((proxy) => maskProxy(proxy) === label);
+  const referenced = String(proxyRef || "").trim();
+  let matches = referenced
+    ? proxyPool.filter((proxy) => proxyReference(proxy) === referenced)
+    : [];
+  if (matches.length !== 1) {
+    matches = proxyPool.filter((proxy) => maskProxy(proxy) === label);
+  }
+  if (matches.length > 1) {
+    const affinities = new Set(matches.map(legacyKookeeyAffinity));
+    if (affinities.size !== 1 || affinities.has("")) {
+      return { primary: "", fallback: "" };
+    }
+    matches = [matches[0]];
+  }
   if (matches.length !== 1) return { primary: "", fallback: "" };
   const primary = matches[0];
   const materialized = materializeProxySession(primary, usedSessions);

@@ -4291,6 +4291,22 @@ def _is_registration_complete(state: dict) -> bool:
     )
 
 
+def _plus_trial_offer_in_page_text(value: Any) -> bool:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text or not re.search(r"\bplus\b", text, re.IGNORECASE):
+        return False
+    patterns = (
+        r"(?:free|complimentary)\s+(?:for\s+)?(?:1|one)\s+months?",
+        r"(?:1|one)\s+months?\s+(?:free|trial)",
+        r"(?:1|one)[ -]?month\s+free\s+trial",
+        r"1\s*(?:か月|ヶ月|カ月)(?:間)?\s*(?:無料|フリー)",
+        r"(?:無料|フリー).{0,40}1\s*(?:か月|ヶ月|カ月)(?:間)?",
+        r"1\s*(?:个月|個月)\s*(?:免费|免費)",
+        r"(?:免费|免費).{0,40}1\s*(?:个月|個月)",
+    )
+    return any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
+
+
 def _post_signup_snapshot(page) -> dict:
     try:
         result = page.evaluate(
@@ -4327,7 +4343,7 @@ def _post_signup_snapshot(page) -> dict:
               const bodyText = String(document.body?.innerText || '').replace(/\s+/g, ' ').trim();
               return {
                 url: String(location.href || ''),
-                body_text: bodyText.slice(0, 1200),
+                body_text: bodyText.slice(0, 6000),
                 visible_button_count: buttons.length,
                 has_terms: hasTerms,
                 has_privacy: hasPrivacy,
@@ -4425,6 +4441,7 @@ def _handle_post_signup_onboarding(
     gate_seen = False
     manual_wait_logged = False
     gate_wait_rounds = 0
+    plus_trial_offer_seen = False
     effective_timeout = (
         max(1, int(manual_continue_timeout or 300))
         if not auto_continue_legal_gate
@@ -4440,6 +4457,9 @@ def _handle_post_signup_onboarding(
             break
         snapshot = _post_signup_snapshot(page)
         last_snapshot = snapshot
+        plus_trial_offer_seen = plus_trial_offer_seen or _plus_trial_offer_in_page_text(
+            snapshot.get("body_text")
+        )
         if snapshot.get("app_ready") and not snapshot.get("legal_gate") and not snapshot.get("questionnaire"):
             marker = str(snapshot.get("app_marker") or "-")
             log(f"注册后准备页面已完成，ChatGPT 主界面就绪: {marker}")
@@ -4450,6 +4470,14 @@ def _handle_post_signup_onboarding(
                 **(
                     {"post_signup_continue_mode": "manual"}
                     if not auto_continue_legal_gate
+                    else {}
+                ),
+                **(
+                    {
+                        "plus_trial_page_offer_seen": True,
+                        "plus_trial_page_offer_evidence_path": "registration_page.visible_text",
+                    }
+                    if plus_trial_offer_seen
                     else {}
                 ),
             }
@@ -4514,6 +4542,81 @@ def _handle_post_signup_onboarding(
             f"等待用户手动点击注册后准备完成页面 Continue 超时（{effective_timeout} 秒）"
         )
     raise RuntimeError(f"注册后未进入可用的 ChatGPT 主界面: {detail or '-'}")
+
+
+def _registration_plus_trial_eligibility(
+    page,
+    session_info: dict[str, Any],
+    registration_state: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    from platforms.chatgpt.payment import (
+        ACCOUNTS_CHECK_URL,
+        PLUS_TRIAL_CAMPAIGN_ID,
+        _plus_trial_eligibility,
+    )
+
+    page_offer_seen = bool((registration_state or {}).get("plus_trial_page_offer_seen"))
+    account_id = str(session_info.get("account_id") or "").strip()
+    access_token = str(session_info.get("access_token") or "").strip()
+    api_evidence = {
+        "plus_trial_eligibility": "unknown",
+        "plus_trial_campaign_id": "",
+        "plus_trial_eligibility_source": "",
+        "plus_trial_eligibility_reason": "注册浏览器尚未取得官方试用资格响应",
+        "plus_trial_eligibility_evidence_path": "",
+    }
+    if account_id and access_token:
+        try:
+            response = _browser_fetch(
+                page,
+                ACCOUNTS_CHECK_URL,
+                method="GET",
+                headers={
+                    "accept": "application/json",
+                    "authorization": f"Bearer {access_token}",
+                    "chatgpt-account-id": account_id,
+                    "referer": f"{CHATGPT_APP}/",
+                    "sec-fetch-site": "same-origin",
+                },
+                redirect="follow",
+                timeout_ms=20_000,
+            )
+            payload = response.get("data") if isinstance(response, dict) else None
+            if response.get("ok") and isinstance(payload, dict):
+                api_evidence = _plus_trial_eligibility(
+                    payload,
+                    account_id,
+                    allow_ineligible=True,
+                    source="registration-browser/accounts/check",
+                )
+            else:
+                api_evidence["plus_trial_eligibility_reason"] = (
+                    "注册浏览器内的官方试用资格接口暂未返回有效结果"
+                )
+        except Exception:
+            api_evidence["plus_trial_eligibility_reason"] = (
+                "注册浏览器内的官方试用资格检测失败，稍后可重新检测"
+            )
+
+    if page_offer_seen:
+        return {
+            "plus_trial_eligibility": "eligible",
+            "plus_trial_campaign_id": (
+                api_evidence.get("plus_trial_campaign_id") or PLUS_TRIAL_CAMPAIGN_ID
+            ),
+            "plus_trial_eligibility_source": (
+                "registration-browser/accounts/check+visible-offer"
+                if api_evidence.get("plus_trial_eligibility") == "eligible"
+                else "registration-browser/visible-offer"
+            ),
+            "plus_trial_eligibility_reason": "ChatGPT 注册页面显示 1 个月 Plus 免费试用",
+            "plus_trial_eligibility_evidence_path": (
+                api_evidence.get("plus_trial_eligibility_evidence_path")
+                if api_evidence.get("plus_trial_eligibility") == "eligible"
+                else "registration_page.visible_text"
+            ),
+        }
+    return api_evidence
 
 
 def _eligibility_flag(value: Any) -> bool | None:
@@ -8348,6 +8451,20 @@ class ChatGPTBrowserRegister:
                 session_info,
                 expected_email=str(email or "").strip(),
             )
+            trial_evidence = _registration_plus_trial_eligibility(
+                page,
+                session_info,
+                final_state,
+            )
+            trial_state = str(
+                trial_evidence.get("plus_trial_eligibility") or "unknown"
+            )
+            if trial_state == "eligible":
+                self.log("已记录官方 1 个月 Plus 免费试用资格（注册浏览器同代理证据）")
+            elif trial_state == "ineligible":
+                self.log("注册浏览器同代理的官方接口未提供 1 个月 Plus 免费试用")
+            else:
+                self.log("注册浏览器未能确认官方 1 个月 Plus 试用资格，标记为待检")
 
             if self.set_password_after_registration and not password_set:
                 candidate_password = str(password or "").strip() or self._generate_password()
@@ -8431,6 +8548,7 @@ class ChatGPTBrowserRegister:
                 "expires_at": session_info.get("expires_at", ""),
                 "session": session_info.get("session", {}),
                 "registration_state": final_state,
+                **trial_evidence,
             }
 
             # 短链复用流程：注册拿到 session 后、**浏览器还开着**时，在同一个

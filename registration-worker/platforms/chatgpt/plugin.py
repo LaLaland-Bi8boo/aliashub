@@ -339,6 +339,44 @@ def _validate_password_action_candidate(value: str) -> str:
     return password
 
 
+_PLUS_TRIAL_OVERVIEW_KEYS = (
+    "plus_trial_eligibility",
+    "plus_trial_campaign_id",
+    "plus_trial_eligibility_source",
+    "plus_trial_eligibility_reason",
+    "plus_trial_eligibility_evidence_path",
+)
+
+
+def _preserve_plus_trial_evidence(
+    details: dict,
+    existing_overview: dict,
+) -> dict:
+    incoming = str(details.get("plus_trial_eligibility") or "unknown").strip().lower()
+    existing = str(
+        existing_overview.get("plus_trial_eligibility") or "unknown"
+    ).strip().lower()
+    existing_source = str(
+        existing_overview.get("plus_trial_eligibility_source") or ""
+    ).strip().lower()
+    preserve = existing == "eligible" and incoming != "eligible"
+    preserve = preserve or (
+        incoming == "unknown"
+        and existing == "ineligible"
+        and (
+            "registration-browser" in existing_source
+            or existing_source.endswith("/proxy")
+        )
+    )
+    if not preserve:
+        return details
+    merged = dict(details)
+    for key in _PLUS_TRIAL_OVERVIEW_KEYS:
+        if key in existing_overview:
+            merged[key] = existing_overview.get(key)
+    return merged
+
+
 @register
 class ChatGPTPlatform(BasePlatform):
     name = "chatgpt"
@@ -491,6 +529,7 @@ class ChatGPTPlatform(BasePlatform):
                         proxy_pool.report_success(proxy)
                     existing_overview = extra.get("account_overview")
                     existing_overview = existing_overview if isinstance(existing_overview, dict) else {}
+                    details = _preserve_plus_trial_evidence(details, existing_overview)
                     existing_plan = str(
                         existing_overview.get("plan_override")
                         or existing_overview.get("account_type")
@@ -798,6 +837,28 @@ class ChatGPTPlatform(BasePlatform):
         }
         if password_error:
             password_overview["password_error"] = password_error
+        if any(str(key).startswith("plus_trial_") for key in result):
+            trial_eligibility = str(
+                result.get("plus_trial_eligibility") or "unknown"
+            ).strip().lower()
+            if trial_eligibility not in {"eligible", "ineligible", "unknown"}:
+                trial_eligibility = "unknown"
+            password_overview.update({
+                "plus_trial_eligibility": trial_eligibility,
+                "plus_trial_campaign_id": str(
+                    result.get("plus_trial_campaign_id") or ""
+                )[:100],
+                "plus_trial_eligibility_source": str(
+                    result.get("plus_trial_eligibility_source") or ""
+                )[:100],
+                "plus_trial_eligibility_reason": str(
+                    result.get("plus_trial_eligibility_reason")
+                    or "官方试用资格待检测"
+                )[:240],
+                "plus_trial_eligibility_evidence_path": str(
+                    result.get("plus_trial_eligibility_evidence_path") or ""
+                )[:120],
+            })
         return RegistrationResult(
             email=result.get("email", ""),
             password=configured_password if password_set else "",

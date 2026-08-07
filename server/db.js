@@ -223,6 +223,7 @@ const schema = `
     stage TEXT NOT NULL DEFAULT 'queued',
     browser_mode TEXT NOT NULL DEFAULT 'headed',
     proxy_label TEXT NOT NULL DEFAULT '',
+    proxy_ref TEXT NOT NULL DEFAULT '',
     exit_ip TEXT NOT NULL DEFAULT '',
     fingerprint_id TEXT NOT NULL DEFAULT '',
     display_name TEXT NOT NULL DEFAULT '',
@@ -696,6 +697,7 @@ export function createDatabase({ filename, seedDemo = false } = {}) {
   if (!codeColumns.includes("is_hidden")) db.exec("ALTER TABLE verification_codes ADD COLUMN is_hidden INTEGER NOT NULL DEFAULT 0");
   db.exec("CREATE INDEX IF NOT EXISTS idx_codes_hidden_received ON verification_codes(is_hidden, received_at DESC)");
   const registrationColumns = db.pragma("table_info(registration_jobs)").map((column) => column.name);
+  if (!registrationColumns.includes("proxy_ref")) db.exec("ALTER TABLE registration_jobs ADD COLUMN proxy_ref TEXT NOT NULL DEFAULT ''");
   if (!registrationColumns.includes("exit_ip")) db.exec("ALTER TABLE registration_jobs ADD COLUMN exit_ip TEXT NOT NULL DEFAULT ''");
   if (!registrationColumns.includes("fingerprint_id")) db.exec("ALTER TABLE registration_jobs ADD COLUMN fingerprint_id TEXT NOT NULL DEFAULT ''");
   if (!registrationColumns.includes("deleted_at")) db.exec("ALTER TABLE registration_jobs ADD COLUMN deleted_at TEXT");

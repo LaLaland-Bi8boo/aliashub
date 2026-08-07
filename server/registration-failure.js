@@ -179,6 +179,7 @@ export function occupiedAliasHistory(rows = []) {
 
 export function publicRegistrationJob(row) {
   if (!row) return row;
+  const { proxy_ref: _proxyRef, ...publicRow } = row;
   const failureReason = registrationFailureReason(row);
   const message = redactProxySecrets(row.message);
   const displayMessages = {
@@ -186,7 +187,7 @@ export function publicRegistrationJob(row) {
     [ACCOUNT_CREATION_POLICY_BLOCKED_REASON]: ACCOUNT_CREATION_POLICY_BLOCKED_MESSAGE,
   };
   return {
-    ...row,
+    ...publicRow,
     message,
     failure_reason: failureReason,
     display_message: displayMessages[failureReason] || message,

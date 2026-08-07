@@ -14,7 +14,11 @@ from core.db import AccountModel, AccountOverviewModel, engine
 from core.lifecycle import check_accounts_validity, refresh_and_sync_cpa
 from core.proxy_pool import proxy_pool
 from platforms.chatgpt import payment
-from platforms.chatgpt.plugin import ChatGPTPlatform, _fetch_authenticated_session_status_details
+from platforms.chatgpt.plugin import (
+    ChatGPTPlatform,
+    _fetch_authenticated_session_status_details,
+    _preserve_plus_trial_evidence,
+)
 
 
 class _AlwaysValidPlatform:
@@ -113,6 +117,7 @@ def _accounts_check_payload(
     entitlement_plan: str,
     active: bool,
     eligible_promo_campaigns=...,
+    **trial_fields,
 ) -> dict:
     payload = {
         "accounts": {
@@ -130,6 +135,7 @@ def _accounts_check_payload(
     }
     if eligible_promo_campaigns is not ...:
         payload["accounts"][account_id]["eligible_promo_campaigns"] = eligible_promo_campaigns
+    payload["accounts"][account_id].update(trial_fields)
     return payload
 
 
@@ -175,6 +181,102 @@ def test_chatgpt_plus_trial_eligibility_is_unknown_when_field_is_missing():
 
     assert result["plus_trial_eligibility"] == "unknown"
     assert result["plus_trial_campaign_id"] == ""
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value", "evidence_suffix"),
+    [
+        ("eligible_offers", [{"offer_id": "plus-one-month-free"}], "eligible_offers"),
+        ("default_offer_id", "chatgpt-plus-1-month-free", "default_offer_id"),
+        (
+            "offers",
+            [{"id": "plus-1-month-free", "epl_enabled": True}],
+            "offers",
+        ),
+    ],
+)
+def test_chatgpt_plus_trial_eligibility_reads_all_official_offer_fields(
+    field_name,
+    field_value,
+    evidence_suffix,
+):
+    account_id = "acct-trial-offers"
+    payload = _accounts_check_payload(
+        account_id,
+        account_plan="free",
+        entitlement_plan="chatgptfreeplan",
+        active=False,
+        **{field_name: field_value},
+    )
+
+    result = payment._plus_trial_eligibility(payload, account_id)
+
+    assert result["plus_trial_eligibility"] == "eligible"
+    assert result["plus_trial_campaign_id"] == "plus-1-month-free"
+    assert result["plus_trial_eligibility_evidence_path"].endswith(evidence_suffix)
+
+
+def test_chatgpt_plus_trial_direct_empty_response_cannot_deny_regional_offer():
+    account_id = "acct-trial-direct"
+    payload = _accounts_check_payload(
+        account_id,
+        account_plan="free",
+        entitlement_plan="chatgptfreeplan",
+        active=False,
+        eligible_promo_campaigns={},
+        eligible_offers=[],
+    )
+
+    result = payment._plus_trial_eligibility(
+        payload,
+        account_id,
+        allow_ineligible=False,
+        source="backend-api/accounts/check/direct",
+    )
+
+    assert result["plus_trial_eligibility"] == "unknown"
+    assert "直连" in result["plus_trial_eligibility_reason"]
+
+
+def test_disabled_offer_is_not_treated_as_trial_eligible():
+    account_id = "acct-trial-disabled"
+    payload = _accounts_check_payload(
+        account_id,
+        account_plan="free",
+        entitlement_plan="chatgptfreeplan",
+        active=False,
+        offers=[{"id": "plus-1-month-free", "epl_enabled": False}],
+    )
+
+    result = payment._plus_trial_eligibility(payload, account_id)
+
+    assert result["plus_trial_eligibility"] == "ineligible"
+
+
+def test_registration_trial_evidence_is_sticky_but_legacy_negative_is_not():
+    existing_eligible = {
+        "plus_trial_eligibility": "eligible",
+        "plus_trial_campaign_id": "plus-1-month-free",
+        "plus_trial_eligibility_source": "registration-browser/visible-offer",
+        "plus_trial_eligibility_reason": "registration page offer",
+    }
+    incoming_negative = {
+        "plus_trial_eligibility": "ineligible",
+        "plus_trial_eligibility_source": "backend-api/accounts/check/proxy",
+    }
+    preserved = _preserve_plus_trial_evidence(incoming_negative, existing_eligible)
+    assert preserved["plus_trial_eligibility"] == "eligible"
+
+    incoming_unknown = {
+        "plus_trial_eligibility": "unknown",
+        "plus_trial_eligibility_source": "backend-api/accounts/check/direct",
+    }
+    legacy_negative = {
+        "plus_trial_eligibility": "ineligible",
+        "plus_trial_eligibility_source": "backend-api/accounts/check",
+    }
+    replaced = _preserve_plus_trial_evidence(incoming_unknown, legacy_negative)
+    assert replaced["plus_trial_eligibility"] == "unknown"
 
 
 def test_single_account_check_recovers_previously_invalid_account(monkeypatch):
