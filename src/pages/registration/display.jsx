@@ -125,6 +125,15 @@ export function AccountSignalCell({ item, compact = false, onRefreshAccessToken,
   const accountStatus = accountSignalText(item, ["account_status", "accountStatus", "lifecycle_status", "lifecycleStatus", "display_status", "displayStatus"], 80);
   const credentialStatus = accountSignalText(item, ["credential_status", "credentialStatus", "validity_status", "validityStatus"], 80);
   const subscriptionStatus = accountSignalText(item, ["subscription_status", "subscriptionStatus", "plan_status", "planStatus", "plan_state", "planState"], 80);
+  const rawTrialEligibility = accountSignalText(item, ["plus_trial_eligibility", "plusTrialEligibility"], 40).toLowerCase();
+  const trialMeta = type.type === "trial"
+    ? { label: "试用中", state: "active" }
+    : rawTrialEligibility === "eligible"
+      ? { label: "官方1月试用", state: "eligible" }
+      : rawTrialEligibility === "ineligible"
+        ? { label: "无官方试用", state: "ineligible" }
+        : { label: "试用待检", state: "unknown" };
+  const trialReason = accountSignalText(item, ["plus_trial_eligibility_reason", "plusTrialEligibilityReason"]);
   const source = accountSignalText(item, ["status_source", "statusSource", "validity_source", "validitySource", "check_source", "checkSource", "source"], 120);
   const sourceAndTime = [
     source && `来源 ${source}`,
@@ -137,6 +146,8 @@ export function AccountSignalCell({ item, compact = false, onRefreshAccessToken,
     accountStatus && `账号状态=${accountStatus}`,
     credentialStatus && `凭据状态=${credentialStatus}`,
     subscriptionStatus && `订阅状态=${subscriptionStatus}`,
+    `官方 1 个月试用=${trialMeta.label}`,
+    trialReason && `试用资格说明=${trialReason}`,
     statusCode && `状态码=${statusCode}`,
     statusReason && `原因=${statusReason}`,
     transient && !statusReason && checkError && `检测错误=${checkError}`,
@@ -152,7 +163,7 @@ export function AccountSignalCell({ item, compact = false, onRefreshAccessToken,
   const accessTokenActionTitle = accessTokenMissing
     ? "使用已绑定邮箱验证码重新登录并获取 Session 和 Access Token"
     : "仅使用现有网页登录 Session 刷新 Access Token，不获取 RT";
-  return <div className={`registration-account-signal ${compact ? "compact" : ""}`} title={title}><div><StatusBadge status={meta.badge}>{meta.label}</StatusBadge><span className={`registration-account-type type-${type.type}`}>{type.label}</span>{accessTokenRefreshRequired && onRefreshAccessToken && <button type="button" className="registration-refresh-at-button" disabled={disabled || refreshingAccessToken} title={accessTokenActionTitle} onClick={() => onRefreshAccessToken(item)}>{refreshingAccessToken ? <LoaderCircle className="spin" size={12} /> : <Mail size={12} />}<span>{accessTokenActionLabel}</span></button>}</div><small className={captionClass}>{checkCaption}</small>{sourceAndTime && <small className="check-meta">{sourceAndTime}</small>}</div>;
+  return <div className={`registration-account-signal ${compact ? "compact" : ""}`} title={title}><div><StatusBadge status={meta.badge}>{meta.label}</StatusBadge><span className={`registration-account-type type-${type.type}`}>{type.label}</span><span className={`registration-trial-badge trial-${trialMeta.state}`}>{trialMeta.label}</span>{accessTokenRefreshRequired && onRefreshAccessToken && <button type="button" className="registration-refresh-at-button" disabled={disabled || refreshingAccessToken} title={accessTokenActionTitle} onClick={() => onRefreshAccessToken(item)}>{refreshingAccessToken ? <LoaderCircle className="spin" size={12} /> : <Mail size={12} />}<span>{accessTokenActionLabel}</span></button>}</div><small className={captionClass}>{checkCaption}</small>{sourceAndTime && <small className="check-meta">{sourceAndTime}</small>}</div>;
 }
 
 export function JobCommands({ job, onLogs, onPause, onResume, onCancel, onRelease, onDelete, busy = false }) {

@@ -9699,9 +9699,66 @@ def check_subscription_status(account: Account, proxy: Optional[str] = None) -> 
     return fetch_subscription_status_details(account, proxy=proxy)["status"]
 
 
+PLUS_TRIAL_CAMPAIGN_ID = "plus-1-month-free"
+
+
+def _normalize_campaign_id(value: Any) -> str:
+    return str(value or "").strip().lower().replace("_", "-")
+
+
+def _contains_campaign_id(value: Any, campaign_id: str) -> bool:
+    target = _normalize_campaign_id(campaign_id)
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if _normalize_campaign_id(key) == target:
+                return True
+            if key in {"id", "campaign_id", "promo_campaign_id"} \
+                    and _normalize_campaign_id(nested) == target:
+                return True
+            if _contains_campaign_id(nested, target):
+                return True
+    elif isinstance(value, (list, tuple, set)):
+        return any(_contains_campaign_id(item, target) for item in value)
+    elif _normalize_campaign_id(value) == target:
+        return True
+    return False
+
+
+def _plus_trial_eligibility(
+    accounts_check: dict[str, Any] | None,
+    account_id: str,
+) -> dict[str, str]:
+    source = "backend-api/accounts/check"
+    evidence_path = "accounts[account_id].eligible_promo_campaigns"
+    accounts = accounts_check.get("accounts") if isinstance(accounts_check, dict) else None
+    node = accounts.get(account_id) if isinstance(accounts, dict) else None
+    if not isinstance(node, dict) or "eligible_promo_campaigns" not in node:
+        return {
+            "plus_trial_eligibility": "unknown",
+            "plus_trial_campaign_id": "",
+            "plus_trial_eligibility_source": source if isinstance(node, dict) else "",
+            "plus_trial_eligibility_reason": "官方资格字段未返回，需重新检测",
+            "plus_trial_eligibility_evidence_path": evidence_path,
+        }
+
+    campaigns = node.get("eligible_promo_campaigns")
+    eligible = _contains_campaign_id(campaigns, PLUS_TRIAL_CAMPAIGN_ID)
+    return {
+        "plus_trial_eligibility": "eligible" if eligible else "ineligible",
+        "plus_trial_campaign_id": PLUS_TRIAL_CAMPAIGN_ID if eligible else "",
+        "plus_trial_eligibility_source": source,
+        "plus_trial_eligibility_reason": (
+            "官方接口确认可领取 1 个月 Plus 免费试用"
+            if eligible else "官方接口未提供 1 个月 Plus 免费试用活动"
+        ),
+        "plus_trial_eligibility_evidence_path": evidence_path,
+    }
+
+
 def _confirmed_subscription_details(
     observation: dict[str, Any],
     *,
+    account_id: str = "",
     plans: list[dict[str, Any]] | None = None,
     plan_conflict: bool = False,
     me: dict[str, Any] | None = None,
@@ -9723,7 +9780,7 @@ def _confirmed_subscription_details(
         plan_authority, confidence = "verified", "medium"
     else:
         plan_authority, confidence = "weak", "low"
-    return {
+    details = {
         "status": status,
         "account_type": status,
         "account_type_raw": raw_status,
@@ -9751,6 +9808,8 @@ def _confirmed_subscription_details(
         "accounts_check": accounts_check,
         "subscriptions": subscriptions,
     }
+    details.update(_plus_trial_eligibility(accounts_check, account_id))
+    return details
 
 
 def fetch_subscription_status_details(account: Account, proxy: Optional[str] = None) -> dict:
@@ -9819,6 +9878,7 @@ def fetch_subscription_status_details(account: Account, proxy: Optional[str] = N
         )
         return _confirmed_subscription_details(
             accounts_paid,
+            account_id=account_id,
             plans=authoritative_plans,
             plan_conflict=conflict,
             accounts_check=accounts_check_data,
@@ -9828,6 +9888,7 @@ def fetch_subscription_status_details(account: Account, proxy: Optional[str] = N
         conflict = bool(accounts_signal.get("free_inactive"))
         return _confirmed_subscription_details(
             subscriptions_paid,
+            account_id=account_id,
             plans=authoritative_plans,
             plan_conflict=conflict,
             accounts_check=accounts_check_data,
@@ -9843,6 +9904,7 @@ def fetch_subscription_status_details(account: Account, proxy: Optional[str] = N
         free_observation["evidence_path"] = "account.plan_type+entitlement+subscriptions.404"
         return _confirmed_subscription_details(
             free_observation,
+            account_id=account_id,
             plans=authoritative_plans,
             accounts_check=accounts_check_data,
             subscriptions=subscriptions_data,
@@ -9868,6 +9930,7 @@ def fetch_subscription_status_details(account: Account, proxy: Optional[str] = N
         usage_observation["evidence_path"] = "response.plan_type"
         return _confirmed_subscription_details(
             usage_observation,
+            account_id=account_id,
             plans=authoritative_plans + [usage_observation],
             usage=usage_data,
             accounts_check=accounts_check_data,
@@ -9918,6 +9981,7 @@ def fetch_subscription_status_details(account: Account, proxy: Optional[str] = N
         me_observation["evidence_path"] = "response.plan_type|orgs[].settings.workspace_plan_type"
         return _confirmed_subscription_details(
             me_observation,
+            account_id=account_id,
             plans=authoritative_plans + list(me_details.get("plans") or []),
             me=me_data,
             usage=usage_data,

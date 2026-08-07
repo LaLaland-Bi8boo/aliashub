@@ -1248,6 +1248,21 @@ def _run_single_account_check(
         "status_retryable": bool(check_overview.get("status_retryable", False)),
         "status_http": int(check_overview.get("status_http") or 0),
         "status_evidence_path": str(check_overview.get("status_evidence_path") or "")[:120],
+        "plus_trial_eligibility": str(
+            check_overview.get("plus_trial_eligibility") or "unknown"
+        ),
+        "plus_trial_campaign_id": str(
+            check_overview.get("plus_trial_campaign_id") or ""
+        )[:100],
+        "plus_trial_eligibility_source": str(
+            check_overview.get("plus_trial_eligibility_source") or ""
+        )[:100],
+        "plus_trial_eligibility_reason": str(
+            check_overview.get("plus_trial_eligibility_reason") or "官方试用资格待检测"
+        )[:240],
+        "plus_trial_eligibility_evidence_path": str(
+            check_overview.get("plus_trial_eligibility_evidence_path") or ""
+        )[:120],
         "status_source": str(
             check_overview.get("status_source")
             or check_overview.get("check_source")

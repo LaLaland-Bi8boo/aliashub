@@ -399,8 +399,13 @@ input[type="range"] { padding: 0; border: 0; box-shadow: none; accent-color: var
 .registration-status { display: grid; justify-items: start; gap: 4px; }
 .registration-status small { color: var(--coral); font-size: 8px; white-space: nowrap; }
 .registration-account-signal { min-width: 138px; display: grid; justify-items: start; gap: 4px; }
-.registration-account-signal > div { min-width: 0; display: flex; align-items: center; gap: 7px; }
+.registration-account-signal > div { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
 .registration-account-type { max-width: 130px; overflow: hidden; color: var(--text); font-size: 9px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.registration-trial-badge { display: inline-flex; min-height: 19px; align-items: center; border: 1px solid var(--line); border-radius: 5px; padding: 0 6px; background: var(--surface-2); color: var(--text-faint); font-size: 8px; font-weight: 700; line-height: 1; white-space: nowrap; }
+.registration-trial-badge.trial-eligible { border-color: color-mix(in srgb, var(--green) 42%, var(--line)); background: var(--green-soft); color: var(--green-dark); }
+.registration-trial-badge.trial-active { border-color: color-mix(in srgb, var(--purple) 42%, var(--line)); background: var(--purple-soft); color: var(--purple); }
+.registration-trial-badge.trial-ineligible { color: var(--text-faint); }
+.registration-trial-badge.trial-unknown { border-style: dashed; color: var(--amber); }
 .registration-account-signal > small { display: -webkit-box; max-width: 220px; overflow: hidden; color: var(--text-faint); font-size: 8px; line-height: 1.35; -webkit-box-orient: vertical; -webkit-line-clamp: 2; white-space: normal; }
 .registration-account-signal > small.check-failed { color: var(--amber); }
 .registration-account-signal > small.check-invalid { color: var(--coral); }

@@ -441,6 +441,22 @@ class ChatGPTPlatform(BasePlatform):
                             "status_retryable": False,
                             "status_http": status_error.http_status,
                             "status_evidence_path": status_error.evidence_path,
+                            "plus_trial_eligibility": str(
+                                existing_overview.get("plus_trial_eligibility") or "unknown"
+                            ),
+                            "plus_trial_campaign_id": str(
+                                existing_overview.get("plus_trial_campaign_id") or ""
+                            ),
+                            "plus_trial_eligibility_source": str(
+                                existing_overview.get("plus_trial_eligibility_source") or ""
+                            ),
+                            "plus_trial_eligibility_reason": str(
+                                existing_overview.get("plus_trial_eligibility_reason")
+                                or "官方试用资格待检测"
+                            ),
+                            "plus_trial_eligibility_evidence_path": str(
+                                existing_overview.get("plus_trial_eligibility_evidence_path") or ""
+                            ),
                             "validity_code": status_error.code,
                             "validity_reason": status_error.reason,
                         }
@@ -637,6 +653,21 @@ class ChatGPTPlatform(BasePlatform):
                         "status_retryable": status_retryable,
                         "status_http": int(details.get("status_http") or 0),
                         "status_evidence_path": str(details.get("status_evidence_path") or "")[:120],
+                        "plus_trial_eligibility": str(
+                            details.get("plus_trial_eligibility") or "unknown"
+                        ),
+                        "plus_trial_campaign_id": str(
+                            details.get("plus_trial_campaign_id") or ""
+                        )[:100],
+                        "plus_trial_eligibility_source": str(
+                            details.get("plus_trial_eligibility_source") or ""
+                        )[:100],
+                        "plus_trial_eligibility_reason": str(
+                            details.get("plus_trial_eligibility_reason") or "官方试用资格待检测"
+                        )[:240],
+                        "plus_trial_eligibility_evidence_path": str(
+                            details.get("plus_trial_eligibility_evidence_path") or ""
+                        )[:120],
                         "validity_code": status_code if status_code != "ok" else "",
                         "validity_reason": status_reason if status_code != "ok" else "",
                     }

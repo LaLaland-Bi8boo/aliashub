@@ -47,6 +47,11 @@ test("registered accounts require the same remote id and email and expose normal
         valid: true,
         checked_at: checkedAt,
         check_source: "backend-api/me",
+        plus_trial_eligibility: "eligible",
+        plus_trial_campaign_id: "plus-1-month-free",
+        plus_trial_eligibility_source: "backend-api/accounts/check",
+        plus_trial_eligibility_reason: "official campaign returned",
+        plus_trial_eligibility_evidence_path: "accounts[account_id].eligible_promo_campaigns",
         password_status: "not_configured",
       },
       credentials: [
@@ -68,6 +73,7 @@ test("registered accounts require the same remote id and email and expose normal
         valid: true,
         checked_at: checkedAt,
         check_source: "backend-api/me",
+        plus_trial_eligibility: "ineligible",
         password_status: "not_configured",
       },
       credentials: [{ key: "access_token", value: "private-disabled-token" }],
@@ -85,6 +91,7 @@ test("registered accounts require the same remote id and email and expose normal
         plan_name: "chatgptteamplan",
         valid: true,
         check_source: "backend-api/me",
+        plus_trial_eligibility: "ineligible",
         password_status: "not_configured",
       },
       display_summary: { status: { checked_at: checkedAt } },
@@ -154,6 +161,11 @@ test("registered accounts require the same remote id and email and expose normal
   assert.equal(plus.status_check_required, false);
   assert.equal(plus.status, "subscribed");
   assert.equal(plus.plan, "plus");
+  assert.equal(plus.plus_trial_eligibility, "eligible");
+  assert.equal(plus.plus_trial_campaign_id, "plus-1-month-free");
+  assert.equal(plus.plus_trial_eligibility_source, "backend-api/accounts/check");
+  assert.equal(plus.plus_trial_eligibility_reason, "official campaign returned");
+  assert.equal(plus.plus_trial_eligibility_evidence_path, "accounts[account_id].eligible_promo_campaigns");
   assert.equal(plus.access_token_available, true);
   assert.equal(plus.session_token_available, true);
   assert.equal(plus.refresh_token_available, false);
@@ -169,6 +181,7 @@ test("registered accounts require the same remote id and email and expose normal
   assert.equal(disabled.account_status, "active");
   assert.equal(disabled.plan_name, "free");
   assert.equal(disabled.status, "invalid");
+  assert.equal(disabled.plus_trial_eligibility, "ineligible");
 
   const team = result.items.find((item) => item.id === 203);
   assert.equal(team.account_type, "team");
@@ -274,6 +287,7 @@ test("unchecked matched accounts refresh once, re-list, and never send mismatche
                 valid: true,
                 checked_at: detectedAt,
                 check_source: "backend-api/me",
+                plus_trial_eligibility: "ineligible",
               } : {}),
             },
             credentials: { access_token: { value: "private-object-token" } },
@@ -319,6 +333,7 @@ test("unchecked matched accounts refresh once, re-list, and never send mismatche
             plan_authority: "authoritative",
             status_source: "backend-api/accounts/check+subscriptions",
             status_checked_at: detectedAt,
+            plus_trial_eligibility: "ineligible",
           }],
           timed_out: 0,
         };
@@ -349,6 +364,68 @@ test("unchecked matched accounts refresh once, re-list, and never send mismatche
   await service.listRegisteredAccounts();
   assert.equal(listCalls, 3);
   assert.equal(refreshCalls, 1);
+});
+
+test("known accounts refresh once when official Plus trial eligibility is unknown", async (t) => {
+  const db = testDatabase(t);
+  addCompletedRegistration(db, 79, "trial-unknown@example.com");
+  let refreshed = false;
+  let refreshCalls = 0;
+  const checkedAt = new Date().toISOString();
+  const service = new RegistrationService({
+    db,
+    graph: {},
+    client: {
+      async listAccounts() {
+        return {
+          total: 1,
+          items: [{
+            id: 79,
+            platform: "chatgpt",
+            email: "trial-unknown@example.com",
+            lifecycle_status: "registered",
+            validity_status: "valid",
+            display_status: "registered",
+            plan_state: "free",
+            plan_name: "free",
+            overview: {
+              valid: true,
+              checked_at: checkedAt,
+              check_source: "backend-api/accounts/check",
+              ...(refreshed ? { plus_trial_eligibility: "ineligible" } : {}),
+            },
+            credentials: [{ key: "access_token", value: "private-token" }],
+          }],
+        };
+      },
+      async refreshAccountPlans(ids) {
+        refreshCalls += 1;
+        assert.deepEqual(ids, [79]);
+        refreshed = true;
+        return {
+          updated: 1,
+          items: [{
+            account_id: 79,
+            ok: true,
+            valid: true,
+            account_type: "free",
+            account_type_raw: "free",
+            type_observed: true,
+            plus_trial_eligibility: "ineligible",
+            status_source: "backend-api/accounts/check",
+            status_checked_at: checkedAt,
+          }],
+          timed_out: 0,
+        };
+      },
+    },
+  });
+
+  const result = await service.listRegisteredAccounts();
+
+  assert.equal(refreshCalls, 1);
+  assert.equal(result.items[0].account_type, "free");
+  assert.equal(result.items[0].plus_trial_eligibility, "ineligible");
 });
 
 test("failed automatic status refresh leaves unchecked state and is cooled down", async (t) => {

@@ -176,6 +176,18 @@ function firstRemoteText(...values) {
   return "";
 }
 
+export function browserUrlWithPassword(browserUrl, password) {
+  const url = String(browserUrl || "").trim();
+  const secret = String(password || "");
+  if (!url || !secret) return url;
+  const hashIndex = url.indexOf("#");
+  const base = hashIndex >= 0 ? url.slice(0, hashIndex) : url;
+  const fragment = hashIndex >= 0 ? url.slice(hashIndex + 1) : "";
+  const params = new URLSearchParams(fragment);
+  params.set("password", secret);
+  return `${base}#${params.toString()}`;
+}
+
 function plusMailEvidenceByEmail(db) {
   const rows = db.prepare(`
     SELECT lower(recipient_address) AS email, subject, received_at
@@ -926,6 +938,28 @@ function accountStatusSignals(item = {}, persistedOutcome = null) {
   const accountTypeRaw = detectedPlan.raw || safeAccountCheckText(persisted?.account_type_raw, 120);
   const accountTypeSource = detectedPlan.known ? detectedPlan.source
     : (persistedType.known ? "persisted" : (detectedPlan.raw ? "raw_plan_name" : "not_detected"));
+  const rawPlusTrialEligibility = normalizeRemoteSignal(firstRemoteText(
+    overview.plus_trial_eligibility,
+    item.plus_trial_eligibility,
+  ), "unknown");
+  const plusTrialEligibility = new Set(["eligible", "ineligible"]).has(rawPlusTrialEligibility)
+    ? rawPlusTrialEligibility : "unknown";
+  const plusTrialCampaignId = safeAccountCheckText(firstRemoteText(
+    overview.plus_trial_campaign_id,
+    item.plus_trial_campaign_id,
+  ), 100);
+  const plusTrialEligibilitySource = safeAccountCheckText(firstRemoteText(
+    overview.plus_trial_eligibility_source,
+    item.plus_trial_eligibility_source,
+  ), 100);
+  const plusTrialEligibilityReason = safeAccountCheckText(firstRemoteText(
+    overview.plus_trial_eligibility_reason,
+    item.plus_trial_eligibility_reason,
+  ));
+  const plusTrialEligibilityEvidencePath = safeAccountCheckText(firstRemoteText(
+    overview.plus_trial_eligibility_evidence_path,
+    item.plus_trial_eligibility_evidence_path,
+  ), 120);
   const confirmation = terminalEvidence || credentialEvidence || subscriptionEvidence || confirmedActive
     ? "confirmed" : "unconfirmed";
   const confirmedAt = confirmation === "confirmed"
@@ -940,6 +974,11 @@ function accountStatusSignals(item = {}, persistedOutcome = null) {
     account_type_raw: accountTypeRaw,
     account_type_known: accountType !== "unknown",
     account_type_source: accountTypeSource,
+    plus_trial_eligibility: plusTrialEligibility,
+    plus_trial_campaign_id: plusTrialCampaignId,
+    plus_trial_eligibility_source: plusTrialEligibilitySource,
+    plus_trial_eligibility_reason: plusTrialEligibilityReason,
+    plus_trial_eligibility_evidence_path: plusTrialEligibilityEvidencePath,
     account_status: accountStatus,
     credential_status: credentialStatus,
     subscription_status: subscriptionStatus,
@@ -965,6 +1004,7 @@ function accountStatusSignals(item = {}, persistedOutcome = null) {
     status_confirmation: conflictingRemoteStatus ? "conflict" : confirmation,
     status_conflict: conflictingRemoteStatus,
     status_check_required: availability === "unchecked" || accountType === "unknown"
+      || plusTrialEligibility === "unknown"
       || latestDetection === "inconclusive" || statusStale,
     access_token_available: accessTokenAvailable,
     session_token_available: sessionTokenAvailable,
@@ -1357,13 +1397,16 @@ function identityFromEvents(events = []) {
 }
 
 export class RegistrationService {
-  constructor({ db, graph, client, publicBaseUrl, mailboxBaseUrl, browserUrl, inboxLinkMailboxes = null, nfapiCredentialSync = null } = {}) {
+  constructor({ db, graph, client, publicBaseUrl, mailboxBaseUrl, browserUrl, browserPassword, inboxLinkMailboxes = null, nfapiCredentialSync = null } = {}) {
     this.db = db;
     this.graph = graph;
     this.client = client;
     this.connectorKey = getSetting(db, "registration_connector_key", "");
     this.mailboxBaseUrl = String(mailboxBaseUrl || publicBaseUrl || "").replace(/\/$/, "");
-    this.browserUrl = browserUrl || "/alias-hub/browser/vnc.html?autoconnect=true&resize=scale&path=websockify";
+    this.browserUrl = browserUrlWithPassword(
+      browserUrl || "/alias-hub/browser/vnc.html?autoconnect=true&resize=scale&path=websockify",
+      browserPassword,
+    );
     this.inboxLinkMailboxes = inboxLinkMailboxes;
     this.scanPromises = new Map();
     this.accountAccessTokenRefreshes = new Map();

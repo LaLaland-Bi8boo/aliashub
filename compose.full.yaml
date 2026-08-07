@@ -5,6 +5,7 @@ services:
       REGISTRATION_SERVICE_TOKEN: "${REGISTRATION_SERVICE_TOKEN:?run ./scripts/setup-local.sh --full first}"
       REGISTRATION_MAILBOX_URL: http://aliashub:4180
       REGISTRATION_BROWSER_URL: "${REGISTRATION_BROWSER_URL:-http://127.0.0.1:${REGISTRATION_BROWSER_PORT:-6080}/vnc.html?autoconnect=true&resize=scale&path=websockify}"
+      REGISTRATION_BROWSER_PASSWORD: "${REGISTRATION_VNC_PASSWORD:?run ./scripts/setup-local.sh --full first}"
     depends_on:
       registration-worker:
         condition: service_healthy

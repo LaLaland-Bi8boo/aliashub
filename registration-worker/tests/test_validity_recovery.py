@@ -33,6 +33,25 @@ class _AlwaysInvalidPlatform:
         return False
 
 
+class _TrialEligiblePlatform:
+    def __init__(self, config: RegisterConfig | None = None):
+        self.config = config
+
+    def check_valid(self, account) -> bool:
+        return True
+
+    def get_last_check_overview(self) -> dict:
+        return {
+            "account_type": "free",
+            "plan_state": "free",
+            "plus_trial_eligibility": "eligible",
+            "plus_trial_campaign_id": "plus-1-month-free",
+            "plus_trial_eligibility_source": "backend-api/accounts/check",
+            "plus_trial_eligibility_reason": "官方接口确认可领取 1 个月 Plus 免费试用",
+            "plus_trial_eligibility_evidence_path": "accounts[account_id].eligible_promo_campaigns",
+        }
+
+
 class _InconclusivePlatform:
     def __init__(self, config: RegisterConfig | None = None):
         self.config = config
@@ -93,8 +112,9 @@ def _accounts_check_payload(
     account_plan: str,
     entitlement_plan: str,
     active: bool,
+    eligible_promo_campaigns=...,
 ) -> dict:
-    return {
+    payload = {
         "accounts": {
             account_id: {
                 "account": {"plan_type": account_plan},
@@ -108,6 +128,53 @@ def _accounts_check_payload(
         },
         "account_ordering": [account_id],
     }
+    if eligible_promo_campaigns is not ...:
+        payload["accounts"][account_id]["eligible_promo_campaigns"] = eligible_promo_campaigns
+    return payload
+
+
+@pytest.mark.parametrize(
+    ("campaigns", "expected", "campaign_id"),
+    [
+        ({"plus-1-month-free": {"active": True}}, "eligible", "plus-1-month-free"),
+        ({}, "ineligible", ""),
+        ([{"promo_campaign_id": "another-offer"}], "ineligible", ""),
+    ],
+)
+def test_chatgpt_plus_trial_eligibility_uses_exact_official_campaign(
+    campaigns,
+    expected,
+    campaign_id,
+):
+    account_id = "acct-trial-check"
+    payload = _accounts_check_payload(
+        account_id,
+        account_plan="free",
+        entitlement_plan="chatgptfreeplan",
+        active=False,
+        eligible_promo_campaigns=campaigns,
+    )
+
+    result = payment._plus_trial_eligibility(payload, account_id)
+
+    assert result["plus_trial_eligibility"] == expected
+    assert result["plus_trial_campaign_id"] == campaign_id
+    assert result["plus_trial_eligibility_source"] == "backend-api/accounts/check"
+
+
+def test_chatgpt_plus_trial_eligibility_is_unknown_when_field_is_missing():
+    account_id = "acct-trial-unknown"
+    payload = _accounts_check_payload(
+        account_id,
+        account_plan="free",
+        entitlement_plan="chatgptfreeplan",
+        active=False,
+    )
+
+    result = payment._plus_trial_eligibility(payload, account_id)
+
+    assert result["plus_trial_eligibility"] == "unknown"
+    assert result["plus_trial_campaign_id"] == ""
 
 
 def test_single_account_check_recovers_previously_invalid_account(monkeypatch):
@@ -123,6 +190,20 @@ def test_single_account_check_recovers_previously_invalid_account(monkeypatch):
     assert overview.validity_status == "valid"
     assert overview.display_status == "registered"
     assert overview.checked_at
+
+
+def test_single_account_check_persists_plus_trial_eligibility(monkeypatch):
+    account_id = _create_account(lifecycle_status="registered")
+    monkeypatch.setattr("application.tasks.get", lambda _platform: _TrialEligiblePlatform)
+
+    valid, result = _run_single_account_check(account_id)
+
+    assert valid is True
+    assert result["plus_trial_eligibility"] == "eligible"
+    assert result["plus_trial_campaign_id"] == "plus-1-month-free"
+    summary = _overview(account_id).get_summary()
+    assert summary["plus_trial_eligibility"] == "eligible"
+    assert summary["plus_trial_campaign_id"] == "plus-1-month-free"
 
 
 def test_single_account_check_keeps_state_when_detection_is_inconclusive(monkeypatch):

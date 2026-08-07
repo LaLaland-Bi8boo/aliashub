@@ -188,6 +188,9 @@ class AccountChecksService:
                     "credential_status", "subscription_status", "account_type", "account_type_raw",
                     "account_type_source", "status_code", "status_reason", "status_retryable",
                     "status_http", "status_evidence_path", "status_source", "status_checked_at",
+                    "plus_trial_eligibility", "plus_trial_campaign_id",
+                    "plus_trial_eligibility_source", "plus_trial_eligibility_reason",
+                    "plus_trial_eligibility_evidence_path",
                 ):
                     public_payload[key] = payload.get(key)
                 return public_payload
@@ -221,6 +224,21 @@ class AccountChecksService:
                             overview.get("account_type_source")
                             or overview.get("plan_source")
                             or "last_confirmed"
+                        ),
+                        "plus_trial_eligibility": str(
+                            overview.get("plus_trial_eligibility") or "unknown"
+                        ),
+                        "plus_trial_campaign_id": str(
+                            overview.get("plus_trial_campaign_id") or ""
+                        ),
+                        "plus_trial_eligibility_source": str(
+                            overview.get("plus_trial_eligibility_source") or ""
+                        ),
+                        "plus_trial_eligibility_reason": str(
+                            overview.get("plus_trial_eligibility_reason") or "官方试用资格待检测"
+                        ),
+                        "plus_trial_eligibility_evidence_path": str(
+                            overview.get("plus_trial_eligibility_evidence_path") or ""
                         ),
                     })
                 return failure

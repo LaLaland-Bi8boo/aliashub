@@ -387,6 +387,7 @@ export function createApp(options = {}) {
     publicBaseUrl,
     mailboxBaseUrl: process.env.REGISTRATION_MAILBOX_URL,
     browserUrl: process.env.REGISTRATION_BROWSER_URL,
+    browserPassword: process.env.REGISTRATION_BROWSER_PASSWORD,
     inboxLinkMailboxes,
   });
   const nfapi = options.nfapi || new NfapiService({
