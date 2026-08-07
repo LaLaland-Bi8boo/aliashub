@@ -209,7 +209,7 @@ function ConnectionModal({ open, onClose, existingAccount, onConnected }) {
           {provider === "icloud_link" ? <div className="icloud-connect-form">
             <label className="form-field oauth-callback-field">
               <span className="field-label">iCloud 取件凭据</span>
-              <textarea rows="6" value={icloudLinkCredential} onChange={(event) => setIcloudLinkCredential(event.target.value)} placeholder="基础邮箱----http://apple55.top/messages/取件令牌/基础邮箱" autoCapitalize="off" autoCorrect="off" spellCheck="false" />
+              <textarea rows="6" value={icloudLinkCredential} onChange={(event) => setIcloudLinkCredential(event.target.value)} placeholder="基础邮箱----https://apple55.top/messages/取件令牌/基础邮箱" autoCapitalize="off" autoCorrect="off" spellCheck="false" />
               <small>{existingAccount ? "粘贴这一邮箱的新取件链接并验证更新。" : "一行一个，单次最多 100 个；基础邮箱不能带 +tag。"}</small>
             </label>
             <div className="provider-login-note"><Link2 size={24} /><span><b>服务器直连取件</b><small>取件不继承注册代理，URL 使用 AES-256-GCM 加密保存</small></span></div>

@@ -11,6 +11,7 @@ import { jsonRequest } from "./http-harness.js";
 const EMAIL = "base-address@icloud.com";
 const SCOPE = "test-scope-token-123456";
 const ACCESS_URL = `http://apple55.top/messages/${SCOPE}/${EMAIL}`;
+const CANONICAL_ACCESS_URL = `https://apple55.top/messages/${SCOPE}/${EMAIL}`;
 const CREDENTIAL = `${EMAIL}----${ACCESS_URL}`;
 
 function json(data, status = 200) {
@@ -33,7 +34,17 @@ function fixture(t) {
 }
 
 test("parses only matching allowlisted iCloud base-mailbox URLs", () => {
-  assert.deepEqual(parseIcloudLinkCredentialLine(CREDENTIAL), { email: EMAIL, accessUrl: ACCESS_URL });
+  assert.deepEqual(parseIcloudLinkCredentialLine(CREDENTIAL), {
+    email: EMAIL,
+    accessUrl: CANONICAL_ACCESS_URL,
+  });
+  assert.deepEqual(parseIcloudLinkCredentialLine(
+    `${EMAIL}----http://mailbox.test/messages/${SCOPE}/${EMAIL}`,
+    { allowedHosts: "mailbox.test" },
+  ), {
+    email: EMAIL,
+    accessUrl: `http://mailbox.test/messages/${SCOPE}/${EMAIL}`,
+  });
   assert.throws(
     () => parseIcloudLinkCredentialLine(`base-address+tag@icloud.com----${ACCESS_URL}`),
     (error) => error.code === "UNSUPPORTED_ICLOUD_LINK_EMAIL",
@@ -79,7 +90,7 @@ test("encrypts iCloud access URLs and scans base64 HTML without using registrati
   assert.equal(imported.account.oauth_connected, false);
   const stored = db.prepare("SELECT * FROM icloud_mailboxes WHERE account_id = ?").get(imported.account.id);
   assert.notEqual(stored.access_url_encrypted, ACCESS_URL);
-  assert.equal(client.decrypt(stored.access_url_encrypted), ACCESS_URL);
+  assert.equal(client.decrypt(stored.access_url_encrypted), CANONICAL_ACCESS_URL);
   assert.doesNotMatch(JSON.stringify(db.prepare("SELECT * FROM audit_log").all()), /test-scope-token/);
 
   const account = db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(imported.account.id);
@@ -87,6 +98,9 @@ test("encrypts iCloud access URLs and scans base64 HTML without using registrati
   assert.equal(scan.items[0].code, "654321");
   assert.equal(scan.messages[0].receivedAt, "2026-08-04T13:50:50.000Z");
   assert.ok(calls.every(({ options }) => !("agent" in options) && !("dispatcher" in options) && !("proxy" in options)));
+  assert.ok(calls.every(({ url }) => url.startsWith("https://apple55.top/")));
+  assert.ok(calls.every(({ url }) => new URL(url).pathname.endsWith("/")));
+  assert.ok(calls.every(({ options }) => options.redirect === "error"));
 });
 
 test("migrates legacy link-backed iCloud accounts without touching official IMAP accounts", (t) => {

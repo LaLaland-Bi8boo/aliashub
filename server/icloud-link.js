@@ -10,6 +10,13 @@ const DEFAULT_TIMEZONE_OFFSET = "+08:00";
 const MAIL_BODY_LIMIT = 100_000;
 const MAX_MESSAGES_PER_SCAN = 100;
 
+function canonicalAccessUrl(parsed) {
+  if (parsed.hostname.toLowerCase() === DEFAULT_ALLOWED_HOSTS) {
+    parsed.protocol = "https:";
+  }
+  return parsed;
+}
+
 function errorWithStatus(message, status = 502, code = "ICLOUD_LINK_ERROR") {
   return Object.assign(new Error(message), { status, code });
 }
@@ -45,7 +52,7 @@ function parseAccessUrl(value, email, allowedHosts) {
     || normalizeEmail(scopedEmail) !== email || parsed.search || parsed.hash) {
     throw errorWithStatus("iCloud 取件 URL 与邮箱不匹配", 400, "ICLOUD_LINK_URL_MISMATCH");
   }
-  return parsed.toString();
+  return canonicalAccessUrl(parsed).toString();
 }
 
 export function parseIcloudLinkCredentialLine(value, { allowedHosts = DEFAULT_ALLOWED_HOSTS } = {}) {
@@ -63,12 +70,12 @@ export function parseIcloudLinkCredentialLine(value, { allowedHosts = DEFAULT_AL
 }
 
 function endpointUrls(accessUrl) {
-  const parsed = new URL(accessUrl);
+  const parsed = canonicalAccessUrl(new URL(accessUrl));
   const scope = parsed.pathname.slice("/messages/".length);
   const root = `${parsed.protocol}//${parsed.host}`;
   return {
-    list: new URL(`/api/messages/${scope}`, root).toString(),
-    detail: (id) => new URL(`/message/${encodeURIComponent(id)}/${scope}`, root).toString(),
+    list: new URL(`/api/messages/${scope}/`, root).toString(),
+    detail: (id) => new URL(`/message/${encodeURIComponent(id)}/${scope}/`, root).toString(),
   };
 }
 
