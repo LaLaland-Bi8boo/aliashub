@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertCircle, AtSign, CheckCircle2, ClipboardPaste, ExternalLink, Globe2, KeyRound, ListPlus, LoaderCircle, Mail, Plus, ShieldCheck, Trash2, Unplug, WandSparkles } from "lucide-react";
+import { AlertCircle, AtSign, CheckCircle2, ClipboardPaste, ExternalLink, Globe2, KeyRound, Link2, ListPlus, LoaderCircle, Mail, Plus, ShieldCheck, Trash2, Unplug, WandSparkles } from "lucide-react";
 import { api } from "../api.js";
 import { Button, ConfirmDialog, EmptyState, FormField, IconButton, LoadingBlock, Modal, ProviderMark, Segmented, StatusBadge, useToast } from "../components.jsx";
 import AliasSyncModal from "../AliasSyncModal.jsx";
@@ -15,6 +15,7 @@ import { accountStatus, relativeTime } from "../utils.js";
 const MicrosoftProviderIcon = ({ size }) => <ProviderMark provider="microsoft" size={size} />;
 const GoogleProviderIcon = ({ size }) => <ProviderMark provider="google" size={size} />;
 const ICloudProviderIcon = ({ size }) => <ProviderMark provider="icloud" size={size} />;
+const ICloudLinkProviderIcon = ({ size }) => <ProviderMark provider="icloud_link" size={size} />;
 
 function ConnectionModal({ open, onClose, existingAccount, onConnected }) {
   const [session, setSession] = useState(null);
@@ -24,6 +25,7 @@ function ConnectionModal({ open, onClose, existingAccount, onConnected }) {
   const [callbackUrl, setCallbackUrl] = useState("");
   const [provider, setProvider] = useState(() => normalizeProvider(existingAccount?.provider));
   const [icloudForm, setIcloudForm] = useState({ email: existingAccount?.email || "", appSpecificPassword: "" });
+  const [icloudLinkCredential, setIcloudLinkCredential] = useState("");
   const [loading, setLoading] = useState(false);
   const toast = useToast();
 
@@ -36,6 +38,7 @@ function ConnectionModal({ open, onClose, existingAccount, onConnected }) {
     setCallbackUrl("");
     setProvider(normalizeProvider(existingAccount?.provider));
     setIcloudForm({ email: existingAccount?.email || "", appSpecificPassword: "" });
+    setIcloudLinkCredential("");
   }, [open, existingAccount?.id]);
 
   const meta = providerMeta(provider);
@@ -138,9 +141,42 @@ function ConnectionModal({ open, onClose, existingAccount, onConnected }) {
     }
   };
 
+  const importIcloudLink = async () => {
+    if (!icloudLinkCredential.trim()) {
+      setMessage("请粘贴 iCloud 基础邮箱和取件 URL");
+      return;
+    }
+    setLoading(true);
+    setStatus("connecting");
+    setMessage("");
+    try {
+      const result = await api("/api/icloud-link/import", {
+        method: "POST",
+        body: {
+          accountId: existingAccount?.id || null,
+          credential: icloudLinkCredential,
+        },
+      });
+      setAccount(result.account);
+      setStatus("connected");
+      setIcloudLinkCredential("");
+      const detail = result.failed ? `，${result.failed} 个失败` : "";
+      toast(`已导入 ${result.imported} 个 iCloud 取件链接${detail}`, result.failed ? "error" : "success");
+      onConnected();
+    } catch (error) {
+      setStatus("error");
+      setMessage(error.message);
+      toast(error.message, "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const waiting = status === "awaiting_callback" || status === "completing";
   const footer = status === "connected"
     ? <Button variant="primary" icon={CheckCircle2} onClick={onClose}>完成</Button>
+    : provider === "icloud_link"
+      ? <><Button onClick={onClose}>取消</Button><Button variant="primary" icon={Link2} loading={loading} onClick={importIcloudLink}>{existingAccount ? "验证并更新" : "导入取件链接"}</Button></>
     : provider === "icloud"
       ? <><Button onClick={onClose}>取消</Button><Button variant="primary" icon={ShieldCheck} loading={loading} onClick={connectIcloud}>{existingAccount ? "验证并更新" : "连接 iCloud"}</Button></>
     : waiting
@@ -150,7 +186,7 @@ function ConnectionModal({ open, onClose, existingAccount, onConnected }) {
   return (
     <Modal open={open} onClose={onClose} title={existingAccount ? `${meta.reconnectLabel} ${meta.name} 账号` : "绑定源头邮箱"} description={existingAccount?.email || meta.description} size="md" footer={footer}>
       {status === "connected" ? (
-        <div className="connection-success"><span><CheckCircle2 size={30} /></span><h3>{provider === "icloud" ? "iCloud Mail 已连接" : "OAuth 授权已完成"}</h3><p>{account?.email}</p><div><b>{provider === "icloud" ? "IMAP" : "RT"}</b><small>{provider === "icloud" ? "App 专用密码已加密保存" : "长期授权已加密保存"}</small></div></div>
+        <div className="connection-success"><span><CheckCircle2 size={30} /></span><h3>{provider === "icloud" ? "iCloud Mail 已连接" : provider === "icloud_link" ? "iCloud 取件链接已连接" : "OAuth 授权已完成"}</h3><p>{account?.email}</p><div><b>{provider === "icloud" ? "IMAP" : provider === "icloud_link" ? "URL" : "RT"}</b><small>{provider === "icloud" ? "App 专用密码已加密保存" : provider === "icloud_link" ? "取件 URL 已加密保存" : "长期授权已加密保存"}</small></div></div>
       ) : waiting ? (
         <div className="oauth-callback-step">
           <span className={`challenge-icon ${status === "completing" ? "pulse" : ""}`}>{status === "completing" ? <LoaderCircle className="spin" size={24} /> : <ExternalLink size={24} />}</span>
@@ -165,12 +201,19 @@ function ConnectionModal({ open, onClose, existingAccount, onConnected }) {
         </div>
       ) : (
         <div className="oauth-start-panel">
-          {!existingAccount && <Segmented value={provider} onChange={(value) => { setProvider(value); setMessage(""); setStatus("idle"); }} ariaLabel="邮箱提供商" items={[{ value: "microsoft", label: "Microsoft", icon: MicrosoftProviderIcon }, { value: "google", label: "Google", icon: GoogleProviderIcon }, { value: "icloud", label: "iCloud", icon: ICloudProviderIcon }]} />}
+          {!existingAccount && <Segmented value={provider} onChange={(value) => { setProvider(value); setMessage(""); setStatus("idle"); }} ariaLabel="邮箱提供商" items={[{ value: "microsoft", label: "Microsoft", icon: MicrosoftProviderIcon }, { value: "google", label: "Google", icon: GoogleProviderIcon }, { value: "icloud", label: "iCloud", icon: ICloudProviderIcon }, { value: "icloud_link", label: "iCloud 取件链接", icon: ICloudLinkProviderIcon }]} />}
           <ProviderMark provider={provider} size={48} />
-          <h3>{provider === "icloud" ? "iCloud Mail IMAP" : `${meta.name} OAuth`}</h3>
-          <p>{provider === "icloud" ? "使用 Apple 账户生成的 App 专用密码，只读连接 iCloud 收件箱" : provider === "google" ? "内置 Thunderbird 邮件公共客户端，无需配置；打开授权后粘贴 localhost 回调" : `由 ${meta.name} 官方页面授权，使用 PKCE 保护授权码`}</p>
+          <h3>{provider === "icloud" ? "iCloud Mail IMAP" : provider === "icloud_link" ? "iCloud 取件链接" : `${meta.name} OAuth`}</h3>
+          <p>{provider === "icloud" ? "使用 Apple 账户生成的 App 专用密码，只读连接 iCloud 收件箱" : provider === "icloud_link" ? "导入基础 iCloud 邮箱和专属取件 URL，注册时自动生成 +tag 地址" : provider === "google" ? "内置 Thunderbird 邮件公共客户端，无需配置；打开授权后粘贴 localhost 回调" : `由 ${meta.name} 官方页面授权，使用 PKCE 保护授权码`}</p>
           {message && <div className="inline-alert danger"><AlertCircle size={17} /><span>{message}</span></div>}
-          {provider === "icloud" ? <div className="icloud-connect-form">
+          {provider === "icloud_link" ? <div className="icloud-connect-form">
+            <label className="form-field oauth-callback-field">
+              <span className="field-label">iCloud 取件凭据</span>
+              <textarea rows="6" value={icloudLinkCredential} onChange={(event) => setIcloudLinkCredential(event.target.value)} placeholder="基础邮箱----http://apple55.top/messages/取件令牌/基础邮箱" autoCapitalize="off" autoCorrect="off" spellCheck="false" />
+              <small>{existingAccount ? "粘贴这一邮箱的新取件链接并验证更新。" : "一行一个，单次最多 100 个；基础邮箱不能带 +tag。"}</small>
+            </label>
+            <div className="provider-login-note"><Link2 size={24} /><span><b>服务器直连取件</b><small>取件不继承注册代理，URL 使用 AES-256-GCM 加密保存</small></span></div>
+          </div> : provider === "icloud" ? <div className="icloud-connect-form">
             <FormField label="Apple 账户邮箱" hint="不限邮箱域名，支持 QQ 邮箱等 Apple 账户"><input type="email" value={existingAccount?.email || icloudForm.email} disabled={Boolean(existingAccount)} onChange={(event) => setIcloudForm({ ...icloudForm, email: event.target.value })} placeholder="name@qq.com" autoComplete="username" /></FormField>
             <FormField label="App 专用密码" hint="不是 Apple 账户登录密码；连接成功后会使用 AES-256-GCM 加密保存"><input type="password" value={icloudForm.appSpecificPassword} onChange={(event) => setIcloudForm({ ...icloudForm, appSpecificPassword: event.target.value })} placeholder="xxxx-xxxx-xxxx-xxxx" autoComplete="new-password" /></FormField>
             <a className="icloud-password-link" href="https://account.apple.com/account/manage" target="_blank" rel="noreferrer"><ExternalLink size={14} />前往 Apple 账户生成 App 专用密码</a>

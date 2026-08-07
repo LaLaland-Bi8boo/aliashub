@@ -11,6 +11,7 @@ import { ExtensionService } from "./extension-service.js";
 import { registerEzCaptchaAdapter } from "./ez-captcha-adapter.js";
 import { GoogleGmailClient } from "./google-gmail.js";
 import { ICloudImapClient, icloudImapConfiguration } from "./icloud-imap.js";
+import { IcloudLinkClient } from "./icloud-link.js";
 import { InboxLinkMailboxService } from "./inbox-link-pool.js";
 import { MicrosoftGraphClient } from "./microsoft-graph.js";
 import { NfapiService, PUBLIC_AGENT_IDENTITY_ERROR_CODES } from "./nfapi-service.js";
@@ -344,6 +345,14 @@ export function createApp(options = {}) {
     imapFactory: options.icloudImapFactory,
     parseMessage: options.icloudParseMessage,
   });
+  const icloudLink = options.icloudLink || new IcloudLinkClient({
+    db,
+    encryptionKey: options.dataEncryptionKey || process.env.DATA_ENCRYPTION_KEY,
+    fetchFn: options.icloudLinkFetchFn || options.fetchFn,
+    allowedHosts: options.icloudLinkAllowedHosts,
+    requestTimeoutMs: options.icloudLinkRequestTimeoutMs,
+    timezoneOffset: options.icloudLinkTimezoneOffset,
+  });
   const inboxLinkMailboxes = options.inboxLinkMailboxes || new InboxLinkMailboxService({
     db,
     encryptionKey: options.dataEncryptionKey ?? process.env.DATA_ENCRYPTION_KEY,
@@ -355,6 +364,7 @@ export function createApp(options = {}) {
       if (account.provider === "google") return gmail.scanInbox(account);
       if (account.provider === "microsoft") return graph.scanInbox(account);
       if (account.provider === "icloud") return icloud.scanInbox(account);
+      if (account.provider === "icloud_link") return icloudLink.scanInbox(account);
       if (account.provider === "inbox_link") return inboxLinkMailboxes.scanInbox(account);
       throw Object.assign(new Error(`不支持的邮箱提供商：${account.provider}`), {
         status: 409,
@@ -812,6 +822,14 @@ export function createApp(options = {}) {
     } catch (error) { next(error); }
   });
 
+  app.post("/api/icloud-link/import", async (req, res, next) => {
+    try {
+      const reconnecting = Boolean(req.body?.accountId);
+      const result = await icloudLink.importCredentials(req.body?.credential, { accountId: req.body?.accountId });
+      res.status(reconnecting ? 200 : 201).json(result);
+    } catch (error) { next(error); }
+  });
+
   app.get("/api/overview", (_req, res) => {
     const accounts = db.prepare(`
       SELECT COUNT(*) AS total,
@@ -876,6 +894,7 @@ export function createApp(options = {}) {
         microsoft: { authMode: "oauth", supportsOfficialAliases: true, supportsPlusAliases: true, supportsImportedAliases: false, supportsDirectRegistration: false },
         google: { authMode: "oauth", supportsOfficialAliases: false, supportsPlusAliases: true, supportsImportedAliases: false, supportsDirectRegistration: false },
         icloud: { authMode: "app_password", supportsOfficialAliases: false, supportsPlusAliases: false, supportsImportedAliases: true, supportsDirectRegistration: true },
+        icloud_link: { authMode: "access_url", supportsOfficialAliases: false, supportsPlusAliases: true, supportsImportedAliases: false, supportsDirectRegistration: false },
         inbox_link: { authMode: "inbox_link", supportsOfficialAliases: false, supportsPlusAliases: false, supportsImportedAliases: false, supportsDirectRegistration: false },
       },
     });
@@ -1506,7 +1525,7 @@ export function createApp(options = {}) {
     if (PUBLIC_AGENT_IDENTITY_ERROR_CODES.has(error?.code)) body.code = error.code;
     res.status(status).json(body);
   });
-  return { app, db, graph, gmail, icloud, inbox, inboxLinkMailboxes, extension, jobs, registration, nfapi, nfapiCredentialSync, microsoftRegistration, microsoftRegistrationRunner };
+  return { app, db, graph, gmail, icloud, icloudLink, inbox, inboxLinkMailboxes, extension, jobs, registration, nfapi, nfapiCredentialSync, microsoftRegistration, microsoftRegistrationRunner };
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

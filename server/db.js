@@ -173,6 +173,12 @@ const schema = `
     credential_updated_at TEXT NOT NULL
   );
 
+  CREATE TABLE IF NOT EXISTS icloud_mailboxes (
+    account_id INTEGER PRIMARY KEY REFERENCES source_accounts(id) ON DELETE CASCADE,
+    access_url_encrypted TEXT NOT NULL,
+    credential_updated_at TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS oauth_code_sessions (
     id TEXT PRIMARY KEY,
     expected_account_id INTEGER REFERENCES source_accounts(id) ON DELETE SET NULL,
@@ -668,6 +674,19 @@ export function createDatabase({ filename, seedDemo = false } = {}) {
   const accountColumns = db.pragma("table_info(source_accounts)").map((column) => column.name);
   if (!accountColumns.includes("provider")) db.exec("ALTER TABLE source_accounts ADD COLUMN provider TEXT NOT NULL DEFAULT 'microsoft'");
   if (!accountColumns.includes("recovery_email")) db.exec("ALTER TABLE source_accounts ADD COLUMN recovery_email TEXT NOT NULL DEFAULT ''");
+  db.exec(`
+    UPDATE source_accounts
+    SET provider = 'icloud_link'
+    WHERE provider = 'icloud'
+      AND EXISTS (
+        SELECT 1 FROM icloud_mailboxes
+        WHERE icloud_mailboxes.account_id = source_accounts.id
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM icloud_credentials
+        WHERE icloud_credentials.account_id = source_accounts.id
+      )
+  `);
   db.exec("DROP TABLE IF EXISTS oauth_device_sessions");
   const tokenColumns = db.pragma("table_info(microsoft_tokens)").map((column) => column.name);
   if (!tokenColumns.includes("client_id")) db.exec("ALTER TABLE microsoft_tokens ADD COLUMN client_id TEXT NOT NULL DEFAULT ''");

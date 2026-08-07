@@ -1503,7 +1503,7 @@ export class RegistrationService {
       ORDER BY COALESCE(registration_jobs.finished_at, registration_jobs.updated_at, registration_jobs.created_at) DESC,
         registration_jobs.id DESC
     `);
-    const accounts = this.db.prepare("SELECT * FROM source_accounts WHERE status = 'connected' AND provider IN ('microsoft', 'google', 'icloud') ORDER BY updated_at DESC").all().map((account) => {
+    const accounts = this.db.prepare("SELECT * FROM source_accounts WHERE status = 'connected' AND provider IN ('microsoft', 'google', 'icloud', 'icloud_link') ORDER BY updated_at DESC").all().map((account) => {
       const direct = account.provider === "icloud";
       const bases = this.db.prepare("SELECT id, address, kind, label, strategy FROM addresses WHERE account_id = ? AND kind IN ('primary', 'official') AND status = 'active' ORDER BY kind = 'primary' DESC, created_at")
         .all(account.id)
@@ -1627,7 +1627,7 @@ export class RegistrationService {
     const account = this.db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(Number(input.accountId));
     if (!account) throw Object.assign(new Error("源头邮箱不存在"), { status: 404 });
     if (account.status !== "connected") throw Object.assign(new Error("请先完成这个源头邮箱的连接验证"), { status: 409 });
-    if (!["microsoft", "google", "icloud"].includes(account.provider)) {
+    if (!["microsoft", "google", "icloud", "icloud_link"].includes(account.provider)) {
       throw Object.assign(new Error("这个邮箱提供商不支持注册地址"), { status: 409 });
     }
     const base = this.db.prepare("SELECT * FROM addresses WHERE id = ? AND account_id = ? AND kind IN ('primary', 'official') AND status = 'active'").get(Number(input.baseAddressId), account.id);
@@ -1710,6 +1710,9 @@ export class RegistrationService {
     }
     const jobs = [];
     const usedProxySessions = new Set();
+    const registrationSerialKey = account.provider === "icloud_link"
+      ? `icloud-link:${crypto.createHash("sha256").update(account.email.toLowerCase()).digest("hex").slice(0, 24)}`
+      : "";
     for (let index = 0; index < addresses.length; index += 1) {
       const address = addresses[index];
       const proxyTemplate = proxies.length ? proxies[index % proxies.length] : "";
@@ -1748,6 +1751,7 @@ export class RegistrationService {
             disable_phone_verification: true,
             phone_verification_policy: "forbid",
             allow_chatgpt_registration_proxy: true,
+            ...(registrationSerialKey ? { registration_serial_key: registrationSerialKey } : {}),
             set_password_after_registration: setPasswordAfterRegistration,
             auto_continue_post_signup: autoContinuePostSignup,
           },
@@ -3310,7 +3314,7 @@ export class RegistrationService {
     }
     const address = this.db.prepare(`
       SELECT addresses.*, source_accounts.status AS account_status, source_accounts.email AS source_email,
-        source_accounts.last_inbox_scan_at
+        source_accounts.provider AS account_provider, source_accounts.last_inbox_scan_at
       FROM addresses JOIN source_accounts ON source_accounts.id = addresses.account_id
       WHERE addresses.address = ? COLLATE NOCASE
     `).get(email);
@@ -3319,8 +3323,20 @@ export class RegistrationService {
       const account = this.db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(address.account_id);
       await this.scanAccount(account);
     }
-    const conditions = ["(mail_messages.address_id = ? OR mail_messages.recipient_address = ? COLLATE NOCASE)"];
-    const params = [address.id, email];
+    const exactRecipient = "(mail_messages.address_id = ? OR mail_messages.recipient_address = ? COLLATE NOCASE)";
+    const linkMessageWithoutRecipient = `(
+      mail_messages.account_id = ?
+      AND mail_messages.address_id IS NULL
+      AND TRIM(mail_messages.recipient_address) = ''
+      AND COALESCE(NULLIF(TRIM(mail_messages.to_recipients), ''), '[]') = '[]'
+      AND COALESCE(NULLIF(TRIM(mail_messages.cc_recipients), ''), '[]') = '[]'
+      AND mail_messages.received_at >= ?
+    )`;
+    const allowsUnassignedMessages = address.account_provider === "icloud_link";
+    const conditions = [allowsUnassignedMessages ? `(${exactRecipient} OR ${linkMessageWithoutRecipient})` : exactRecipient];
+    const params = allowsUnassignedMessages
+      ? [address.id, email, address.account_id, address.created_at]
+      : [address.id, email];
     if (query.subject_contains) { conditions.push("mail_messages.subject LIKE ?"); params.push(`%${query.subject_contains}%`); }
     if (query.from_contains) { conditions.push("mail_messages.sender_address LIKE ?"); params.push(`%${query.from_contains}%`); }
     if (query.keyword) {

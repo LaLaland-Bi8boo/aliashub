@@ -40,10 +40,12 @@ export function publicAccount(db, row) {
       ? Boolean(db.prepare("SELECT 1 FROM microsoft_tokens WHERE account_id = ?").get(row.id))
       : provider === "icloud"
         ? Boolean(db.prepare("SELECT 1 FROM icloud_credentials WHERE account_id = ?").get(row.id))
-        : provider === "inbox_link"
-          ? Boolean(db.prepare("SELECT 1 FROM inbox_link_mailboxes WHERE source_account_id = ? AND status = 'active'").get(row.id))
-          : false;
-  const oauthConnected = !["icloud", "inbox_link"].includes(provider) && credentialConnected;
+        : provider === "icloud_link"
+          ? Boolean(db.prepare("SELECT 1 FROM icloud_mailboxes WHERE account_id = ?").get(row.id))
+          : provider === "inbox_link"
+            ? Boolean(db.prepare("SELECT 1 FROM inbox_link_mailboxes WHERE source_account_id = ? AND status = 'active'").get(row.id))
+            : false;
+  const oauthConnected = !["icloud", "icloud_link", "inbox_link"].includes(provider) && credentialConnected;
   return {
     ...row,
     provider,
@@ -58,9 +60,9 @@ export function publicAccount(db, row) {
     oauth_connected: oauthConnected,
     credential_connected: credentialConnected,
     connection_connected: credentialConnected,
-    auth_mode: provider === "icloud" ? "app_password" : provider === "inbox_link" ? "inbox_link" : "oauth",
+    auth_mode: provider === "icloud" ? "app_password" : provider === "icloud_link" ? "access_url" : provider === "inbox_link" ? "inbox_link" : "oauth",
     supports_official_aliases: provider === "microsoft",
-    supports_plus_aliases: ["microsoft", "google"].includes(provider),
+    supports_plus_aliases: ["microsoft", "google", "icloud_link"].includes(provider),
     supports_imported_aliases: provider === "icloud",
     supports_direct_registration: provider === "icloud",
   };
@@ -475,7 +477,9 @@ export class JobRunner {
         ? "正在读取 Gmail 收件箱"
         : account.provider === "icloud"
           ? "正在读取 iCloud Mail 收件箱"
-          : account.provider === "inbox_link" ? "正在读取链接取件邮箱" : "正在读取 Outlook 收件箱",
+          : account.provider === "icloud_link"
+            ? "正在读取 iCloud 取件链接"
+            : account.provider === "inbox_link" ? "正在读取链接取件邮箱" : "正在读取 Outlook 收件箱",
       started_at: nowIso(),
     });
     try {

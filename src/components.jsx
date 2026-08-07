@@ -49,6 +49,7 @@ export function InboxLinkMark({ size = 34 }) {
 export function ProviderMark({ provider, size = 34 }) {
   if (provider === "google") return <GoogleMark size={size} />;
   if (provider === "icloud") return <ICloudMark size={size} />;
+  if (provider === "icloud_link") return <InboxLinkMark size={size} />;
   if (provider === "inbox_link") return <InboxLinkMark size={size} />;
   return <MicrosoftMark size={size} />;
 }

@@ -207,6 +207,11 @@ def _task_result_seed(result: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 def _task_account_keys(task_type: str, payload: dict[str, Any]) -> list[str]:
+    if task_type == TASK_TYPE_REGISTER:
+        extra = dict(payload.get("extra") or {})
+        serial_key = str(extra.get("registration_serial_key") or "").strip()
+        if serial_key:
+            return [f"registration:{serial_key}"]
     if task_type in {TASK_TYPE_ACCOUNT_CHECK, TASK_TYPE_PLATFORM_ACTION}:
         account_id = int(payload.get("account_id", 0) or 0)
         if account_id > 0:
