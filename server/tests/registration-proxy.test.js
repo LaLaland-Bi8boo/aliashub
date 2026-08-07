@@ -15,6 +15,7 @@ import {
 } from "../registration-proxy.js";
 
 const stickyProxy = "http://proxy-user:base-secret-TR-12345678-30m@gate-us.kookeey.info:1000";
+const stickyProxyWithoutTtl = "http://proxy-user:base-secret-JP-87654321@gate.kookeey.info:1000";
 
 test("registration proxy parser normalizes supported forms and rejects ambiguous credentials", () => {
   assert.deepEqual(parseProxyPool(`
@@ -44,6 +45,10 @@ test("registration proxy helpers expose safe labels and redact nested remote val
     redactProxySecrets(`upstream rejected ${stickyProxy}`),
     "upstream rejected http://***@gate-us.kookeey.info:1000",
   );
+  assert.equal(
+    redactProxySecrets("upstream rejected base-secret-JP-87654321"),
+    "upstream rejected [REDACTED]",
+  );
   assert.deepEqual(sanitizeRegistrationRemoteValue({
     message: `upstream rejected ${stickyProxy}`,
     proxy: { username: "proxy-user", password: "base-secret", session_id: "12345678" },
@@ -63,6 +68,12 @@ test("registration proxy helpers materialize independent Kookeey sessions", () =
     session_ttl: "30m",
   });
   assert.equal(kookeeyStickyTemplate("http://proxy.example:8080"), null);
+  assert.deepEqual(proxyMetadata(stickyProxyWithoutTtl), {
+    provider: "Kookeey",
+    dynamic_mode: "sticky_session",
+    country_code: "JP",
+    session_ttl: "",
+  });
 
   const usedSessions = new Set();
   const first = materializeProxySession(stickyProxy, usedSessions);
@@ -74,6 +85,12 @@ test("registration proxy helpers materialize independent Kookeey sessions", () =
     const password = decodeURIComponent(new URL(value).password);
     assert.match(password, /^base-secret-TR-\d{8}-30m$/);
   }
+  const withoutTtl = materializeProxySession(stickyProxyWithoutTtl, usedSessions);
+  assert.notEqual(withoutTtl, stickyProxyWithoutTtl);
+  assert.match(
+    decodeURIComponent(new URL(withoutTtl).password),
+    /^base-secret-JP-\d{8}$/,
+  );
 
   const route = statusCheckProxyRoute(maskProxy(stickyProxy), [stickyProxy], new Set());
   assert.equal(route.primary, stickyProxy);
@@ -112,6 +129,16 @@ test("legacy jobs recover a shared Kookeey region but reject ambiguous regions",
   assert.deepEqual(
     statusCheckProxyRoute(maskProxy(firstJapan), [firstJapan, unitedStates]),
     { primary: "", fallback: "" },
+  );
+
+  const firstJapanWithoutTtl = "http://proxy-user:base-secret-JP-44444444@gate.kookeey.info:1000";
+  const secondJapanWithoutTtl = "http://proxy-user:base-secret-JP-55555555@gate.kookeey.info:1000";
+  assert.equal(
+    statusCheckProxyRoute(
+      maskProxy(firstJapanWithoutTtl),
+      [firstJapanWithoutTtl, secondJapanWithoutTtl],
+    ).primary,
+    firstJapanWithoutTtl,
   );
 });
 

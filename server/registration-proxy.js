@@ -1,8 +1,8 @@
 import crypto from "node:crypto";
 import { isIP } from "node:net";
 
-const KOOKEEY_GATEWAY_HOST = /^gate-[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.kookeey\.info$/i;
-const KOOKEEY_STICKY_PASSWORD = /^(.+)-([a-z]{2})-(\d{4,32})-([1-9]\d{0,3})m$/i;
+const KOOKEEY_GATEWAY_HOST = /^gate(?:-[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)?\.kookeey\.info$/i;
+const KOOKEEY_STICKY_PASSWORD = /^(.+)-([a-z]{2})-(\d{4,32})(?:-([1-9]\d{0,3})m)?$/i;
 const KOOKEEY_MAX_SESSION_TTL_MINUTES = 1_440;
 
 export function parseProxyPool(value) {
@@ -99,7 +99,7 @@ export function redactProxySecrets(value) {
   return String(value ?? "")
     .replace(/\b([a-z][a-z0-9+.-]*:(?:\\?\/){2})([^\s/?#@]+)@/gi, "$1***@")
     .replace(/((?:\[[0-9a-f:.]+\]|localhost|(?:[a-z0-9-]+\.)+[a-z0-9-]+|\d{1,3}(?:\.\d{1,3}){3}):\d{1,5}):[^\s:]+:[^\s,;，]+/gi, "$1:***:***")
-    .replace(/(?<![a-z0-9])(?:[a-z0-9._~!$&'()*+,;=%-]+)-[a-z]{2}-\d{4,32}-[1-9]\d{0,3}m(?![a-z0-9])/gi, "[REDACTED]")
+    .replace(/(?<![a-z0-9])(?:[a-z0-9._~!$&'()*+,;=%-]+)-[a-z]{2}-\d{4,32}(?:-[1-9]\d{0,3}m)?(?![a-z0-9])/gi, "[REDACTED]")
     .replace(/((?:proxy(?:[\s_.-]*(?:url|uri|address|server|username|user|password|pass|auth(?:orization)?|credentials?|session(?:[\s_.-]*id)?))?|代理(?:地址|服务器|用户名|用户|密码|认证|凭据|会话(?:编号)?)?)\s*[:=：]\s*)(?:(?:basic|bearer)\s+[^\s,;]+|"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;，]+)/gi, "$1[REDACTED]");
 }
 
@@ -129,8 +129,11 @@ export function kookeeyStickyTemplate(value) {
     const password = decodeURIComponent(parsed.password);
     const match = password.match(KOOKEEY_STICKY_PASSWORD);
     if (!match) return null;
-    const ttlMinutes = Number(match[4]);
-    if (!Number.isSafeInteger(ttlMinutes) || ttlMinutes < 1 || ttlMinutes > KOOKEEY_MAX_SESSION_TTL_MINUTES) {
+    const ttlMinutes = match[4] ? Number(match[4]) : 0;
+    if (match[4]
+      && (!Number.isSafeInteger(ttlMinutes)
+        || ttlMinutes < 1
+        || ttlMinutes > KOOKEEY_MAX_SESSION_TTL_MINUTES)) {
       return null;
     }
     return {
@@ -140,7 +143,7 @@ export function kookeeyStickyTemplate(value) {
       passwordPrefix: match[1],
       countryCode: match[2].toUpperCase(),
       sessionId: match[3],
-      sessionTtl: `${ttlMinutes}m`,
+      sessionTtl: ttlMinutes ? `${ttlMinutes}m` : "",
     };
   } catch {
     return null;
@@ -172,8 +175,8 @@ export function materializeProxySession(value, usedSessions = new Set()) {
     const sessionKey = `${template.host}\n${template.encodedUsername}\n${sessionId}`;
     if (sessionId === template.sessionId || usedSessions.has(sessionKey)) continue;
     usedSessions.add(sessionKey);
-    const ttlMinutes = template.sessionTtl.slice(0, -1);
-    const password = `${template.passwordPrefix}-${template.countryCode}-${sessionId}-${ttlMinutes}m`;
+    const ttlSuffix = template.sessionTtl ? `-${template.sessionTtl}` : "";
+    const password = `${template.passwordPrefix}-${template.countryCode}-${sessionId}${ttlSuffix}`;
     return `${template.protocol}//${template.encodedUsername}:${encodeURIComponent(password)}@${template.host}`;
   }
   throw new Error("动态代理会话生成失败");
