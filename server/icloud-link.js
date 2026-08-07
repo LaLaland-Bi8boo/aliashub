@@ -75,8 +75,43 @@ function endpointUrls(accessUrl) {
   const root = `${parsed.protocol}//${parsed.host}`;
   return {
     list: new URL(`/api/messages/${scope}/`, root).toString(),
-    detail: (id) => new URL(`/message/${encodeURIComponent(id)}/${scope}/`, root).toString(),
+    detail: (id) => new URL(`/message/${encodeURIComponent(id)}/${scope}`, root).toString(),
   };
+}
+
+function attributeValue(attributes, name) {
+  const match = String(attributes || "").match(new RegExp(`\\b${name}\\s*=\\s*(["'])(.*?)\\1`, "i"));
+  return match ? htmlToText(match[2]) : "";
+}
+
+function classContent(body, className) {
+  const match = String(body || "").match(new RegExp(
+    `<[^>]+class=["'][^"']*\\b${className}\\b[^"']*["'][^>]*>([\\s\\S]*?)<\\/[^>]+>`,
+    "i",
+  ));
+  return match ? htmlToText(match[1]) : "";
+}
+
+function messagesFromAccessPage(html) {
+  const source = String(html || "");
+  if (!/<div\b[^>]*\bid=["']message-list["']/i.test(source)) {
+    throw errorWithStatus("iCloud 取件服务返回了无效的邮件页面", 502, "INVALID_ICLOUD_LINK_RESPONSE");
+  }
+  const items = [];
+  for (const match of source.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/gi)) {
+    const attributes = match[1];
+    const classes = attributeValue(attributes, "class").split(/\s+/);
+    const id = attributeValue(attributes, "data-id");
+    if (!classes.includes("item") || !id) continue;
+    items.push({
+      id,
+      subject: classContent(match[2], "subject"),
+      received_at: classContent(match[2], "time"),
+      from_address: classContent(match[2], "from"),
+    });
+    if (items.length >= MAX_MESSAGES_PER_SCAN) break;
+  }
+  return items;
 }
 
 function normalizeReceivedAt(value, timezoneOffset) {
@@ -146,12 +181,42 @@ export class IcloudLinkClient {
     }
   }
 
-  async listMessages(accessUrl) {
-    const data = await this.jsonRequest(endpointUrls(accessUrl).list);
-    if (!Array.isArray(data?.items)) {
-      throw errorWithStatus("iCloud 取件服务返回了无效的邮件列表", 502, "INVALID_ICLOUD_LINK_RESPONSE");
+  async textRequest(url) {
+    const controller = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, this.requestTimeoutMs);
+    try {
+      const response = await this.fetch(url, {
+        headers: { Accept: "text/html" },
+        redirect: "error",
+        signal: controller.signal,
+      });
+      const data = await response.text().catch(() => "");
+      if (!response.ok) {
+        throw errorWithStatus("iCloud 取件服务请求失败", response.status || 502, "ICLOUD_LINK_REQUEST_FAILED");
+      }
+      return data;
+    } catch (error) {
+      if (error?.code === "ICLOUD_LINK_REQUEST_FAILED") throw error;
+      if (timedOut) throw errorWithStatus(`iCloud 取件请求超时（${this.requestTimeoutMs}ms）`, 504, "ICLOUD_LINK_REQUEST_TIMEOUT");
+      throw errorWithStatus("iCloud 取件服务暂时不可用", 502, "ICLOUD_LINK_REQUEST_FAILED");
+    } finally {
+      clearTimeout(timer);
     }
-    return data.items.slice(0, MAX_MESSAGES_PER_SCAN);
+  }
+
+  async listMessages(accessUrl) {
+    try {
+      const data = await this.jsonRequest(endpointUrls(accessUrl).list);
+      if (!Array.isArray(data?.items)) {
+        throw errorWithStatus("iCloud 取件服务返回了无效的邮件列表", 502, "INVALID_ICLOUD_LINK_RESPONSE");
+      }
+      return data.items.slice(0, MAX_MESSAGES_PER_SCAN);
+    } catch (error) {
+      if (error?.code !== "ICLOUD_LINK_REQUEST_FAILED" || error?.status !== 404) throw error;
+    }
+    const pageUrl = canonicalAccessUrl(new URL(accessUrl)).toString();
+    return messagesFromAccessPage(await this.textRequest(pageUrl));
   }
 
   async importCredential(value, { accountId = null } = {}) {

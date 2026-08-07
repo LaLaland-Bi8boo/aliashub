@@ -19,6 +19,16 @@ function json(data, status = 200) {
     ok: status >= 200 && status < 300,
     status,
     json: async () => data,
+    text: async () => JSON.stringify(data),
+  };
+}
+
+function html(data, status = 200) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => ({}),
+    text: async () => data,
   };
 }
 
@@ -99,7 +109,48 @@ test("encrypts iCloud access URLs and scans base64 HTML without using registrati
   assert.equal(scan.messages[0].receivedAt, "2026-08-04T13:50:50.000Z");
   assert.ok(calls.every(({ options }) => !("agent" in options) && !("dispatcher" in options) && !("proxy" in options)));
   assert.ok(calls.every(({ url }) => url.startsWith("https://apple55.top/")));
-  assert.ok(calls.every(({ url }) => new URL(url).pathname.endsWith("/")));
+  assert.ok(calls.some(({ url }) => new URL(url).pathname === `/api/messages/${SCOPE}/${EMAIL}/`));
+  assert.ok(calls.some(({ url }) => new URL(url).pathname === `/message/42/${SCOPE}/${EMAIL}`));
+  assert.ok(calls.every(({ options }) => options.redirect === "error"));
+});
+
+test("falls back to the server-rendered mailbox page when the legacy list API returns 404", async (t) => {
+  const { db } = fixture(t);
+  const calls = [];
+  const client = new IcloudLinkClient({
+    db,
+    encryptionKey: "test-key",
+    fetchFn: async (url, options) => {
+      const parsed = new URL(url);
+      calls.push({ url: String(url), options });
+      if (parsed.pathname.startsWith("/api/messages/")) return json({}, 404);
+      if (parsed.pathname.startsWith("/messages/")) {
+        return html(`<!doctype html><div class="list" id="message-list">
+          <a class="item active" href="#mail-73" data-id="73">
+            <div class="subject">OpenAI code &amp; notice <span>(spam)</span></div>
+            <div class="time">2026-08-07 15:47:55</div>
+            <div class="from">noreply@example.test</div>
+          </a>
+        </div>`);
+      }
+      if (parsed.pathname === `/message/73/${SCOPE}/${EMAIL}`) {
+        return json({
+          body: "Your OpenAI verification code is 778899",
+          subject: "OpenAI code & notice",
+          fromAddress: "noreply@example.test",
+          receivedAt: "2026-08-07 15:47:55",
+        });
+      }
+      throw new Error(`Unexpected request: ${parsed.pathname}`);
+    },
+  });
+
+  const imported = await client.importCredential(CREDENTIAL);
+  const account = db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(imported.account.id);
+  const scan = await client.scanInbox(account);
+  assert.equal(scan.items[0].code, "778899");
+  assert.equal(scan.messages[0].senderAddress, "noreply@example.test");
+  assert.ok(calls.some(({ options }) => options.headers.Accept === "text/html"));
   assert.ok(calls.every(({ options }) => options.redirect === "error"));
 });
 
