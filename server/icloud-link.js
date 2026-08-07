@@ -95,6 +95,11 @@ function classContent(body, className) {
 function messagesFromAccessPage(html) {
   const source = String(html || "");
   if (!/<div\b[^>]*\bid=["']message-list["']/i.test(source)) {
+    const pageText = htmlToText(source);
+    if (/全部邮件（共\s*0\s*封）/.test(pageText)
+      && /暂时没有同步到这个子邮箱的邮件/.test(pageText)) {
+      return [];
+    }
     throw errorWithStatus("iCloud 取件服务返回了无效的邮件页面", 502, "INVALID_ICLOUD_LINK_RESPONSE");
   }
   const items = [];

@@ -154,6 +154,47 @@ test("falls back to the server-rendered mailbox page when the legacy list API re
   assert.ok(calls.every(({ options }) => options.redirect === "error"));
 });
 
+test("accepts a valid server-rendered mailbox page before its first message arrives", async (t) => {
+  const { db } = fixture(t);
+  const client = new IcloudLinkClient({
+    db,
+    encryptionKey: "test-key",
+    fetchFn: async (url) => {
+      const parsed = new URL(url);
+      if (parsed.pathname.startsWith("/api/messages/")) return json({}, 404);
+      if (parsed.pathname.startsWith("/messages/")) {
+        return html(`<!doctype html><html><head><title>${EMAIL} 全部邮件</title></head><body>
+          <main><div class="layout"><aside class="card"><div class="top">
+            <h2>${EMAIL}</h2><div>全部邮件（共 0 封）</div>
+          </div><div class="placeholder">暂时没有同步到这个子邮箱的邮件。</div></aside>
+          <section><article id="mail-view">请选择一封邮件</article></section></div></main>
+        </body></html>`);
+      }
+      throw new Error(`Unexpected request: ${parsed.pathname}`);
+    },
+  });
+
+  const imported = await client.importCredential(CREDENTIAL);
+  assert.equal(imported.status, "connected");
+  assert.equal(imported.account.email, EMAIL);
+});
+
+test("rejects unrelated HTML returned for an iCloud pickup link", async (t) => {
+  const { db } = fixture(t);
+  const client = new IcloudLinkClient({
+    db,
+    encryptionKey: "test-key",
+    fetchFn: async (url) => new URL(url).pathname.startsWith("/api/messages/")
+      ? json({}, 404)
+      : html("<!doctype html><title>Service unavailable</title><p>Please retry later</p>"),
+  });
+
+  await assert.rejects(
+    () => client.importCredential(CREDENTIAL),
+    (error) => error.code === "INVALID_ICLOUD_LINK_RESPONSE",
+  );
+});
+
 test("migrates legacy link-backed iCloud accounts without touching official IMAP accounts", (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "aliashub-icloud-link-migration-test-"));
   const filename = path.join(directory, "test.db");
