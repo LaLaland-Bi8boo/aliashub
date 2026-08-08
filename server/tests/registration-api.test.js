@@ -1414,6 +1414,68 @@ test("registration integration generates isolated addresses and exposes mailbox 
       }
     });
 
+    await t.test("exports selected registered iCloud aliases with their original pickup links", async () => {
+      const source = createSourceAccount(db, {
+        email: "pickup-source@icloud.com",
+        provider: "icloud_link",
+      });
+      const accessUrl = "https://msg.linlanyu.com/messages/test-export-token-123456789/pickup-source@icloud.com";
+      const timestamp = "2100-01-02T00:00:00.000Z";
+      const insertJob = db.prepare(`
+        INSERT INTO registration_jobs (
+          account_id, email, external_task_id, external_account_id, status, stage,
+          browser_mode, proxy_label, message, created_at, updated_at, finished_at
+        ) VALUES (?, ?, ?, ?, 'completed', 'completed', 'headed', '直连', '注册成功', ?, ?, ?)
+      `);
+      try {
+        db.prepare(`
+          INSERT INTO icloud_mailboxes (account_id, access_url_encrypted, credential_updated_at)
+          VALUES (?, ?, ?)
+        `).run(source.id, runtime.icloudLink.encrypt(accessUrl), timestamp);
+        insertJob.run(
+          source.id,
+          "pickup-source+gpt-export@icloud.com",
+          "mailbox-export-task",
+          "4200",
+          timestamp,
+          timestamp,
+          timestamp,
+        );
+        insertJob.run(
+          account.id,
+          "source+not-icloud@outlook.com",
+          "mailbox-export-skip-task",
+          "4201",
+          timestamp,
+          timestamp,
+          timestamp,
+        );
+
+        const exported = await jsonRequest(runtime.app, "/api/registration/accounts/export-mailbox-links", {
+          method: "POST",
+          body: JSON.stringify({ ids: [4200, 4201] }),
+        });
+        assert.equal(exported.response.status, 200);
+        assert.deepEqual(exported.body.items, [{
+          id: 4200,
+          email: "pickup-source+gpt-export@icloud.com",
+          credential: `pickup-source+gpt-export@icloud.com----${accessUrl}`,
+        }]);
+        assert.equal(exported.body.exported, 1);
+        assert.equal(exported.body.skipped.length, 1);
+        assert.equal(exported.body.skipped[0].id, 4201);
+
+        const unavailable = await jsonRequest(runtime.app, "/api/registration/accounts/export-mailbox-links", {
+          method: "POST",
+          body: JSON.stringify({ ids: [4201] }),
+        });
+        assert.equal(unavailable.response.status, 409);
+      } finally {
+        db.prepare("DELETE FROM registration_jobs WHERE external_account_id IN ('4200', '4201')").run();
+        db.prepare("DELETE FROM source_accounts WHERE id = ?").run(source.id);
+      }
+    });
+
     await t.test("keeps occupied alias markers after completed jobs, soft deletes, and split deletion", async () => {
       const splitAddresses = db.prepare(`
         SELECT id, address FROM addresses

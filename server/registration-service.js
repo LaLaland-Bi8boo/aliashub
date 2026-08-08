@@ -1417,7 +1417,7 @@ function identityFromEvents(events = []) {
 }
 
 export class RegistrationService {
-  constructor({ db, graph, client, publicBaseUrl, mailboxBaseUrl, browserUrl, browserPassword, inboxLinkMailboxes = null, nfapiCredentialSync = null } = {}) {
+  constructor({ db, graph, client, publicBaseUrl, mailboxBaseUrl, browserUrl, browserPassword, icloudLink = null, inboxLinkMailboxes = null, nfapiCredentialSync = null } = {}) {
     this.db = db;
     this.graph = graph;
     this.client = client;
@@ -1427,6 +1427,7 @@ export class RegistrationService {
       browserUrl || "/alias-hub/browser/vnc.html?autoconnect=true&resize=scale&path=websockify",
       browserPassword,
     );
+    this.icloudLink = icloudLink;
     this.inboxLinkMailboxes = inboxLinkMailboxes;
     this.scanPromises = new Map();
     this.accountAccessTokenRefreshes = new Map();
@@ -3074,6 +3075,56 @@ export class RegistrationService {
     const refreshToken = refreshTokenFromAccount(account);
     if (!refreshToken) throw Object.assign(new Error("这个账号尚未获取到 Refresh Token"), { status: 404 });
     return { id: accountId, email: account.email, refresh_token: refreshToken };
+  }
+
+  exportRegisteredAccountMailboxLinks(input = {}) {
+    const ids = normalizeSelectedIds(input, "注册账号");
+    const placeholders = ids.map(() => "?").join(",");
+    const rows = this.db.prepare(`
+      SELECT registration_jobs.external_account_id, registration_jobs.email,
+        source_accounts.provider AS source_provider, icloud_mailboxes.access_url_encrypted
+      FROM registration_jobs
+      LEFT JOIN source_accounts ON source_accounts.id = registration_jobs.account_id
+      LEFT JOIN icloud_mailboxes ON icloud_mailboxes.account_id = registration_jobs.account_id
+      WHERE registration_jobs.external_account_id IN (${placeholders})
+        AND registration_jobs.status = 'completed'
+        AND registration_jobs.deleted_at IS NULL
+      ORDER BY registration_jobs.created_at DESC, registration_jobs.id DESC
+    `).all(...ids.map(String));
+    const latestById = new Map();
+    for (const row of rows) {
+      const key = String(row.external_account_id || "");
+      if (key && !latestById.has(key)) latestById.set(key, row);
+    }
+
+    const items = [];
+    const skipped = [];
+    for (const id of ids) {
+      const row = latestById.get(String(id));
+      const email = String(row?.email || "").trim().toLowerCase();
+      if (!row) {
+        skipped.push({ id, email: "", reason: "注册账号不存在" });
+        continue;
+      }
+      if (row.source_provider !== "icloud_link" || !row.access_url_encrypted) {
+        skipped.push({ id, email, reason: "不是 iCloud 取件链接注册账号" });
+        continue;
+      }
+      if (!this.icloudLink || typeof this.icloudLink.decrypt !== "function") {
+        skipped.push({ id, email, reason: "iCloud 取件链接服务不可用" });
+        continue;
+      }
+      try {
+        const accessUrl = this.icloudLink.decrypt(row.access_url_encrypted);
+        items.push({ id, email, credential: `${email}----${accessUrl}` });
+      } catch (error) {
+        skipped.push({ id, email, reason: error.message || "取件链接无法解密" });
+      }
+    }
+    if (!items.length) {
+      throw Object.assign(new Error(skipped[0]?.reason || "所选账号没有可导出的 iCloud 取件链接"), { status: 409 });
+    }
+    return { exported: items.length, skipped, items };
   }
 
   async registeredAccountSub2Export(id) {

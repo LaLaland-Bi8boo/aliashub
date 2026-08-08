@@ -388,6 +388,7 @@ export function createApp(options = {}) {
     mailboxBaseUrl: process.env.REGISTRATION_MAILBOX_URL,
     browserUrl: process.env.REGISTRATION_BROWSER_URL,
     browserPassword: process.env.REGISTRATION_BROWSER_PASSWORD,
+    icloudLink,
     inboxLinkMailboxes,
   });
   const nfapi = options.nfapi || new NfapiService({
@@ -707,6 +708,9 @@ export function createApp(options = {}) {
         skipNfapiSync: input.skip_nfapi_sync === true,
       }));
     } catch (error) { next(error); }
+  });
+  app.post("/api/registration/accounts/export-mailbox-links", (req, res, next) => {
+    try { res.json(registration.exportRegisteredAccountMailboxLinks(req.body || {})); } catch (error) { next(error); }
   });
   app.patch("/api/registration/accounts/bulk-group", async (req, res, next) => {
     try { res.json(await registration.updateRegisteredAccountGroups(req.body || {})); } catch (error) { next(error); }

@@ -95,6 +95,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
   const [copyingSelectedTokens, setCopyingSelectedTokens] = useState(false);
   const [exportingSub2, setExportingSub2] = useState(false);
   const [exportingRefreshTokens, setExportingRefreshTokens] = useState(false);
+  const [exportingMailboxLinks, setExportingMailboxLinks] = useState(false);
   const [checkingAccountSignals, setCheckingAccountSignals] = useState(false);
   const accountSignalRefreshBusy = useRef(false);
   const lastFocusedAccountRefreshAt = useRef(0);
@@ -1378,6 +1379,32 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
     }
   };
 
+  const exportSelectedMailboxLinks = async () => {
+    if (!selectedAccountIds.length) return;
+    setExportingMailboxLinks(true);
+    try {
+      const result = await api("/api/registration/accounts/export-mailbox-links", {
+        method: "POST",
+        body: { ids: selectedAccountIds },
+      });
+      const credentials = (result.items || []).map((item) => item.credential).filter(Boolean);
+      if (!credentials.length) throw new Error("所选账号没有可导出的 iCloud 取件链接");
+      downloadTextFile(
+        `aliashub-icloud-mailboxes-${new Date().toISOString().slice(0, 10)}.txt`,
+        `${credentials.join("\n")}\n`,
+        "text/plain;charset=utf-8",
+      );
+      const skipped = Array.isArray(result.skipped) ? result.skipped.length : 0;
+      toast(skipped
+        ? `已导出 ${credentials.length} 个账号，跳过 ${skipped} 个非取件链接账号`
+        : `已导出 ${credentials.length} 个账号的邮箱取件格式`, skipped ? "error" : "success");
+    } catch (error) {
+      toast(error.message || "邮箱取件格式导出失败", "error");
+    } finally {
+      setExportingMailboxLinks(false);
+    }
+  };
+
   const copyRegisteredAccount = async (item) => {
     if (!item?.email) {
       toast("账号目标已不存在，请刷新后重试", "error");
@@ -1562,6 +1589,7 @@ export default function RegistrationPage({ refreshKey, onNavigate, initialMailbo
               <Button size="sm" icon={Pencil} disabled={!selectedAccountIds.length || importingNfapi} title="统一修改所选账号的分组" onClick={openBulkGroupEditor}>编辑分组</Button>
               <Button size="sm" icon={SlidersHorizontal} disabled={!selectedAccountIds.length || importingNfapi} title="为所选账号统一配置并批量导入 NFapi" onClick={() => openNfapiImporter(selectedAccountIds)}>批量导入</Button>
               <Button size="sm" icon={KeyRound} loading={copyingSelectedTokens} disabled={!selectedAccountIds.length || importingNfapi} onClick={copySelectedAccessTokens}>复制 AT</Button>
+              <Button size="sm" icon={Link2} loading={exportingMailboxLinks} disabled={!selectedAccountIds.length || importingNfapi} title="导出注册邮箱和原 iCloud 取件链接 TXT" onClick={exportSelectedMailboxLinks}>导出取件</Button>
               <Button size="sm" icon={Download} loading={exportingSub2} disabled={!selectedAccountIds.length || importingNfapi} title="导出为 Sub2API Codex Session JSON" onClick={exportSelectedSub2}>导出 Sub2</Button>
               <Button size="sm" icon={ShieldCheck} disabled={!selectedAccountIds.length || importingNfapi} title="通过 OpenAI OAuth 为所选账号逐个获取 Refresh Token" onClick={openRefreshTokenOAuth}>OAuth 获取 RT</Button>
               <Button size="sm" icon={KeyRound} loading={exportingRefreshTokens} disabled={!selectedAccountIds.length || importingNfapi} title="导出包含邮箱和 Refresh Token 的 JSON" onClick={exportSelectedRefreshTokens}>导出 RT</Button>
