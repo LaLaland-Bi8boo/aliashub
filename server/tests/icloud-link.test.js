@@ -114,7 +114,7 @@ test("encrypts iCloud access URLs and scans base64 HTML without using registrati
   assert.equal(scan.messages[0].receivedAt, "2026-08-04T13:50:50.000Z");
   assert.ok(calls.every(({ options }) => !("agent" in options) && !("dispatcher" in options) && !("proxy" in options)));
   assert.ok(calls.every(({ url }) => url.startsWith("https://apple55.top/")));
-  assert.ok(calls.some(({ url }) => new URL(url).pathname === `/api/messages/${SCOPE}/${EMAIL}/`));
+  assert.ok(calls.some(({ url }) => new URL(url).pathname === `/api/messages/${SCOPE}/${EMAIL}`));
   assert.ok(calls.some(({ url }) => new URL(url).pathname === `/message/42/${SCOPE}/${EMAIL}`));
   assert.ok(calls.every(({ options }) => options.redirect === "error"));
 });

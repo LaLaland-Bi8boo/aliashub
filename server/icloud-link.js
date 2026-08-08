@@ -75,7 +75,7 @@ function endpointUrls(accessUrl) {
   const scope = parsed.pathname.slice("/messages/".length);
   const root = `${parsed.protocol}//${parsed.host}`;
   return {
-    list: new URL(`/api/messages/${scope}/`, root).toString(),
+    list: new URL(`/api/messages/${scope}`, root).toString(),
     detail: (id) => new URL(`/message/${encodeURIComponent(id)}/${scope}`, root).toString(),
   };
 }
