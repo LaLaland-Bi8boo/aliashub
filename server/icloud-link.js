@@ -72,11 +72,20 @@ export function parseIcloudLinkCredentialLine(value, { allowedHosts = DEFAULT_AL
 
 function endpointUrls(accessUrl) {
   const parsed = canonicalAccessUrl(new URL(accessUrl));
+  const segments = parsed.pathname.split("/").filter(Boolean);
   const scope = parsed.pathname.slice("/messages/".length);
   const root = `${parsed.protocol}//${parsed.host}`;
+  if (parsed.hostname.toLowerCase() === "msg.linlanyu.com") {
+    const list = new URL("/api/messages", root);
+    list.searchParams.set("email", decodeURIComponent(segments[2] || ""));
+    list.searchParams.set("token", segments[1] || "");
+    list.searchParams.set("limit", String(MAX_MESSAGES_PER_SCAN));
+    return { list: list.toString(), detail: null, inlineDetails: true };
+  }
   return {
     list: new URL(`/api/messages/${scope}`, root).toString(),
     detail: (id) => new URL(`/message/${encodeURIComponent(id)}/${scope}`, root).toString(),
+    inlineDetails: false,
   };
 }
 
@@ -214,10 +223,13 @@ export class IcloudLinkClient {
   async listMessages(accessUrl) {
     try {
       const data = await this.jsonRequest(endpointUrls(accessUrl).list);
-      if (!Array.isArray(data?.items)) {
+      const items = Array.isArray(data?.items)
+        ? data.items
+        : (Array.isArray(data?.data?.messages) ? data.data.messages : null);
+      if (!items) {
         throw errorWithStatus("iCloud 取件服务返回了无效的邮件列表", 502, "INVALID_ICLOUD_LINK_RESPONSE");
       }
-      return data.items.slice(0, MAX_MESSAGES_PER_SCAN);
+      return items.slice(0, MAX_MESSAGES_PER_SCAN);
     } catch (error) {
       if (error?.code !== "ICLOUD_LINK_REQUEST_FAILED" || error?.status !== 404) throw error;
     }
@@ -297,12 +309,15 @@ export class IcloudLinkClient {
   }
 
   normalizeMessage(account, item, detail) {
-    const decodedBody = decodeDataUrl(detail?.body);
+    const detailBody = typeof detail?.html === "string" && detail.html.trim()
+      ? detail.html
+      : detail?.body;
+    const decodedBody = decodeDataUrl(detailBody);
     const rawBody = decodedBody.slice(0, MAIL_BODY_LIMIT);
     const bodyText = htmlToText(rawBody);
     const subject = scalar(detail?.subject || item?.subject).trim() || "(无主题)";
-    const senderAddress = normalizeEmail(detail?.fromAddress || item?.from_address)
-      || scalar(detail?.fromAddress || item?.from_address).trim();
+    const senderAddress = normalizeEmail(detail?.fromAddress || detail?.from || item?.from_address)
+      || scalar(detail?.fromAddress || detail?.from || item?.from_address).trim();
     const receivedAt = normalizeReceivedAt(detail?.receivedAt || item?.received_at, this.timezoneOffset);
     const messageId = scalar(item?.id).trim();
     const graphMessageId = `icloud-link:${messageId}`;
@@ -356,7 +371,7 @@ export class IcloudLinkClient {
         .get(account.id, `icloud-link:${id}`);
     });
     const messages = await Promise.all(unseen.map(async (item) => {
-      const detail = await this.jsonRequest(endpoints.detail(item.id));
+      const detail = endpoints.inlineDetails ? item : await this.jsonRequest(endpoints.detail(item.id));
       return this.normalizeMessage(account, item, detail);
     }));
     return {

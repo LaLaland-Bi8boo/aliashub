@@ -159,6 +159,51 @@ test("falls back to the server-rendered mailbox page when the legacy list API re
   assert.ok(calls.every(({ options }) => options.redirect === "error"));
 });
 
+test("reads linlanyu query API messages and uses their inline bodies", async (t) => {
+  const { db } = fixture(t);
+  const email = "linlanyu-source@icloud.com";
+  const token = "linlanyu-test-token-1234567890";
+  const accessUrl = `https://msg.linlanyu.com/messages/${token}/${email}`;
+  const calls = [];
+  const client = new IcloudLinkClient({
+    db,
+    encryptionKey: "test-key",
+    fetchFn: async (url, options) => {
+      const parsed = new URL(url);
+      calls.push({ parsed, options });
+      assert.equal(parsed.pathname, "/api/messages");
+      assert.equal(parsed.searchParams.get("email"), email);
+      assert.equal(parsed.searchParams.get("token"), token);
+      assert.equal(parsed.searchParams.get("limit"), "100");
+      return json({
+        success: true,
+        data: {
+          count: 1,
+          messages: [{
+            id: "linlanyu-message-1",
+            from: "noreply@openai.com",
+            subject: "Your ChatGPT verification code",
+            body: "Use code 654321 to continue.",
+            html: "<p>Use code <strong>654321</strong> to continue.</p>",
+            receivedAt: "2026-08-08T15:40:00.000Z",
+          }],
+        },
+      });
+    },
+  });
+
+  const imported = await client.importCredential(`${email}----${accessUrl}`);
+  const account = db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(imported.account.id);
+  const scanned = await client.scanInbox(account);
+
+  assert.equal(calls.length, 2);
+  assert.ok(calls.every(({ options }) => options.redirect === "error"));
+  assert.equal(scanned.messages.length, 1);
+  assert.equal(scanned.messages[0].senderAddress, "noreply@openai.com");
+  assert.equal(scanned.messages[0].verificationCode, "654321");
+  assert.match(scanned.messages[0].body, /<strong>654321<\/strong>/);
+});
+
 test("accepts a valid server-rendered mailbox page before its first message arrives", async (t) => {
   const { db } = fixture(t);
   const client = new IcloudLinkClient({
