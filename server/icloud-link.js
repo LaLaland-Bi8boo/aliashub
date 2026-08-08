@@ -4,14 +4,15 @@ import { codeFromText, normalizeEmail } from "./address-generator.js";
 import { audit, createSourceAccount, nowIso } from "./db.js";
 import { decodeDataUrl, htmlToText } from "./mail-content.js";
 
-const DEFAULT_ALLOWED_HOSTS = "apple55.top";
+const DEFAULT_ALLOWED_HOSTS = "apple55.top,msg.linlanyu.com";
+const CANONICAL_HTTPS_HOST = "apple55.top";
 const DEFAULT_REQUEST_TIMEOUT_MS = 20_000;
 const DEFAULT_TIMEZONE_OFFSET = "+08:00";
 const MAIL_BODY_LIMIT = 100_000;
 const MAX_MESSAGES_PER_SCAN = 100;
 
 function canonicalAccessUrl(parsed) {
-  if (parsed.hostname.toLowerCase() === DEFAULT_ALLOWED_HOSTS) {
+  if (parsed.hostname.toLowerCase() === CANONICAL_HTTPS_HOST) {
     parsed.protocol = "https:";
   }
   return parsed;

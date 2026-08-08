@@ -12,6 +12,7 @@ const EMAIL = "base-address@icloud.com";
 const SCOPE = "test-scope-token-123456";
 const ACCESS_URL = `http://apple55.top/messages/${SCOPE}/${EMAIL}`;
 const CANONICAL_ACCESS_URL = `https://apple55.top/messages/${SCOPE}/${EMAIL}`;
+const LINLANYU_URL = `https://msg.linlanyu.com/messages/${SCOPE}/${EMAIL}`;
 const CREDENTIAL = `${EMAIL}----${ACCESS_URL}`;
 
 function json(data, status = 200) {
@@ -47,6 +48,10 @@ test("parses only matching allowlisted iCloud base-mailbox URLs", () => {
   assert.deepEqual(parseIcloudLinkCredentialLine(CREDENTIAL), {
     email: EMAIL,
     accessUrl: CANONICAL_ACCESS_URL,
+  });
+  assert.deepEqual(parseIcloudLinkCredentialLine(`${EMAIL}----${LINLANYU_URL}`), {
+    email: EMAIL,
+    accessUrl: LINLANYU_URL,
   });
   assert.deepEqual(parseIcloudLinkCredentialLine(
     `${EMAIL}----http://mailbox.test/messages/${SCOPE}/${EMAIL}`,
