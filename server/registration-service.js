@@ -37,6 +37,7 @@ const ACTIVE_STATUSES = new Set(["pending", "claimed", "running", "paused", "can
 const RELEASABLE_JOB_STATUSES = new Set(["queued", "pending", "claimed", "running", "paused", "cancel_requested"]);
 const ACCOUNT_STATUS_REFRESH_COOLDOWN_MS = 15 * 60 * 1000;
 const ACCOUNT_STATUS_REFRESH_BATCH_SIZE = 20;
+const REGISTRATION_JOB_SYNC_CONCURRENCY = 3;
 
 function normalizeSelectedIds(input, label, maximum = 500) {
   if (!Array.isArray(input?.ids)) {
@@ -82,6 +83,20 @@ function timingSafeEqual(left, right) {
 
 function wait(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function mapLimit(values, limit, mapper) {
+  const output = new Array(values.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(Math.max(1, limit), values.length) }, async () => {
+    while (cursor < values.length) {
+      const index = cursor;
+      cursor += 1;
+      output[index] = await mapper(values[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return output;
 }
 
 function accountCredentials(item = {}) {
@@ -2008,7 +2023,7 @@ export class RegistrationService {
       WHERE registration_jobs.deleted_at IS NULL
       ORDER BY registration_jobs.created_at DESC LIMIT ?
     `).all(Math.max(1, Math.min(500, Number(limit) || 100)));
-    const synced = await Promise.all(rows.map((row) => this.syncJob(row)));
+    const synced = await mapLimit(rows, REGISTRATION_JOB_SYNC_CONCURRENCY, (row) => this.syncJob(row));
     return synced.map(publicRegistrationJob);
   }
 

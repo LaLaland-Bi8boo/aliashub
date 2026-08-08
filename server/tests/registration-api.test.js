@@ -1370,6 +1370,50 @@ test("registration integration generates isolated addresses and exposes mailbox 
       }
     });
 
+    await t.test("limits concurrent remote synchronization while listing registration jobs", async () => {
+      const insert = db.prepare(`
+        INSERT INTO registration_jobs (
+          account_id, address_id, base_address_id, email, external_task_id, status, stage, browser_mode,
+          proxy_label, fingerprint_id, message, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 'running', 'register', 'headed', '直连', '', '等待同步', ?, ?)
+      `);
+      const jobIds = [];
+      const originalGetTask = client.getTask;
+      const originalGetTaskEvents = client.getTaskEvents;
+      let activeRequests = 0;
+      let maximumActiveRequests = 0;
+      try {
+        for (let index = 0; index < 8; index += 1) {
+          const timestamp = `2100-01-01T00:00:${String(index).padStart(2, "0")}.000Z`;
+          jobIds.push(Number(insert.run(
+            account.id,
+            base.id,
+            base.id,
+            `sync-limit-${index}@example.test`,
+            `sync-limit-task-${index}`,
+            timestamp,
+            timestamp,
+          ).lastInsertRowid));
+        }
+        client.getTask = async (taskId) => {
+          activeRequests += 1;
+          maximumActiveRequests = Math.max(maximumActiveRequests, activeRequests);
+          await new Promise((resolve) => setTimeout(resolve, 15));
+          activeRequests -= 1;
+          return { task_id: taskId, type: "register", status: "running", progress_current: 0, progress_total: 1 };
+        };
+        client.getTaskEvents = async () => [];
+
+        const jobs = await runtime.registration.listJobs({ limit: 8 });
+        assert.equal(jobs.length, 8);
+        assert.equal(maximumActiveRequests, 3);
+      } finally {
+        client.getTask = originalGetTask;
+        client.getTaskEvents = originalGetTaskEvents;
+        db.prepare(`DELETE FROM registration_jobs WHERE id IN (${jobIds.map(() => "?").join(", ")})`).run(...jobIds);
+      }
+    });
+
     await t.test("keeps occupied alias markers after completed jobs, soft deletes, and split deletion", async () => {
       const splitAddresses = db.prepare(`
         SELECT id, address FROM addresses
