@@ -637,6 +637,50 @@ def test_chatgpt_free_requires_inactive_entitlement_and_no_subscription(monkeypa
     assert details["plan_authority"] == "authoritative"
 
 
+def test_chatgpt_accounts_check_detects_paid_secondary_workspace(monkeypatch):
+    account_id = "acct-personal-free"
+    paid_workspace_id = "12345678-1234-4234-8234-123456789abc"
+
+    def _fake_get(url, **_kwargs):
+        if url == payment.ACCOUNTS_CHECK_URL:
+            payload = _accounts_check_payload(
+                account_id,
+                account_plan="free",
+                entitlement_plan="chatgptfreeplan",
+                active=False,
+            )
+            payload["account_ordering"].append(paid_workspace_id)
+            payload["accounts"][paid_workspace_id] = {
+                "account": {"plan_type": "plus"},
+                "entitlement": {
+                    "has_active_subscription": True,
+                    "subscription_plan": "chatgptplusplan",
+                },
+            }
+            return _JsonResponse(payload)
+        if url == payment.SUBSCRIPTIONS_URL:
+            return _JsonResponse(
+                {"detail": "No subscription found for account"},
+                status_code=404,
+            )
+        raise AssertionError(f"unexpected endpoint: {url}")
+
+    monkeypatch.setattr(payment.cffi_requests, "get", _fake_get)
+    account = type(
+        "AccountStub",
+        (),
+        {"access_token": "token", "id_token": "", "extra": {"account_id": account_id}},
+    )()
+
+    details = payment.fetch_subscription_status_details(account)
+
+    assert details["account_type"] == "plus"
+    assert details["subscription_status"] == "active"
+    assert details["account_type_source"] == "backend-api/accounts/check"
+    assert details["accounts_check"]["account_ordering"] == [account_id, paid_workspace_id]
+    assert details["plans"][0]["workspace_id"] == paid_workspace_id
+
+
 def test_chatgpt_accounts_check_never_borrows_default_workspace(monkeypatch):
     account_id = "acct-exact-node"
 

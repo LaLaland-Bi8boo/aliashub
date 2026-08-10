@@ -1127,8 +1127,61 @@ def _fetch_subscriptions_data(account, account_id: str, proxy: Optional[str] = N
     return data
 
 
-def _accounts_check_plan_signal(data: dict[str, Any], account_id: str) -> dict[str, Any]:
-    node = data["accounts"][account_id]
+def _accounts_check_workspace_ids(data: dict[str, Any], account_id: str) -> list[str]:
+    accounts = data.get("accounts")
+    if not isinstance(accounts, dict) or account_id not in accounts:
+        return []
+
+    ordered_ids: set[str] = set()
+    ordering = data.get("account_ordering")
+    if isinstance(ordering, list):
+        for item in ordering:
+            if isinstance(item, dict):
+                value = next((item.get(key) for key in (
+                    "id", "account_id", "accountId", "workspace_id", "workspaceId"
+                ) if item.get(key)), "")
+            else:
+                value = item
+            text = str(value or "").strip()
+            if text:
+                ordered_ids.add(text)
+
+    workspace_ids: list[str] = []
+    for raw_workspace_id, raw_node in accounts.items():
+        workspace_id = str(raw_workspace_id or "").strip()
+        if not workspace_id or not isinstance(raw_node, dict):
+            continue
+        account_node = raw_node.get("account")
+        account_node = account_node if isinstance(account_node, dict) else {}
+        declared_ids = {
+            str(value or "").strip()
+            for value in (
+                raw_node.get("id"), raw_node.get("account_id"), raw_node.get("accountId"),
+                account_node.get("id"), account_node.get("account_id"), account_node.get("accountId"),
+            )
+            if str(value or "").strip()
+        }
+        uuid_like = bool(re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            workspace_id,
+            flags=re.IGNORECASE,
+        ))
+        if (
+            workspace_id == account_id
+            or workspace_id in ordered_ids
+            or workspace_id in declared_ids
+            or uuid_like
+        ):
+            workspace_ids.append(workspace_id)
+    if account_id in workspace_ids:
+        workspace_ids.remove(account_id)
+    return [account_id, *workspace_ids]
+
+
+def _accounts_check_node_plan_signal(
+    node: dict[str, Any],
+    workspace_id: str,
+) -> dict[str, Any]:
     account_data = node.get("account") if isinstance(node.get("account"), dict) else {}
     entitlement = node.get("entitlement") if isinstance(node.get("entitlement"), dict) else {}
     account_observation = _plan_observation(
@@ -1156,10 +1209,11 @@ def _accounts_check_plan_signal(data: dict[str, Any], account_id: str) -> dict[s
 
     if paid_observation:
         paid_observation = dict(paid_observation)
+        paid_observation["workspace_id"] = workspace_id
         paid_observation["evidence_path"] = (
-            "accounts[account_id].entitlement.subscription_plan"
+            f"accounts[{workspace_id}].entitlement.subscription_plan"
             if paid_observation.get("scope") == "entitlement"
-            else "accounts[account_id].account.plan_type"
+            else f"accounts[{workspace_id}].account.plan_type"
         )
         if entitlement_active is True:
             paid_observation["subscription_state"] = (
@@ -1177,12 +1231,50 @@ def _accounts_check_plan_signal(data: dict[str, Any], account_id: str) -> dict[s
     )
     free_observation = dict(account_observation) if free_inactive else None
     if free_observation:
+        free_observation["workspace_id"] = workspace_id
         free_observation["subscription_state"] = "free"
-        free_observation["evidence_path"] = "accounts[account_id].account.plan_type+entitlement"
+        free_observation["evidence_path"] = (
+            f"accounts[{workspace_id}].account.plan_type+entitlement"
+        )
     return {
         "paid_observation": paid_observation,
         "free_observation": free_observation,
         "free_inactive": free_inactive,
+    }
+
+
+def _accounts_check_plan_signal(data: dict[str, Any], account_id: str) -> dict[str, Any]:
+    accounts = data["accounts"]
+    workspace_ids = _accounts_check_workspace_ids(data, account_id)
+    target_signal = _accounts_check_node_plan_signal(accounts[account_id], account_id)
+    paid_candidates: list[dict[str, Any]] = []
+    for workspace_id in workspace_ids:
+        signal = _accounts_check_node_plan_signal(accounts[workspace_id], workspace_id)
+        paid = signal.get("paid_observation")
+        if not paid:
+            continue
+        if workspace_id != account_id and paid.get("subscription_state") not in {"active", "trialing"}:
+            continue
+        paid_candidates.append(paid)
+
+    state_rank = {"active": 40, "trialing": 30, "past_due": 20, "expired": 10}
+    plan_rank = {
+        "enterprise": 90, "business": 80, "team": 70, "edu": 60,
+        "pro": 50, "plus": 40, "go": 30, "trial": 20, "free": 10,
+    }
+    paid_observation = max(
+        paid_candidates,
+        key=lambda item: (
+            state_rank.get(str(item.get("subscription_state") or ""), 0),
+            plan_rank.get(str(item.get("plan_family") or ""), 0),
+        ),
+        default=None,
+    )
+    return {
+        "paid_observation": paid_observation,
+        "free_observation": target_signal.get("free_observation"),
+        "free_inactive": target_signal.get("free_inactive", False),
+        "workspace_ids": workspace_ids,
     }
 
 
