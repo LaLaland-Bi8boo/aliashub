@@ -819,6 +819,43 @@ def test_chatgpt_subscription_status_falls_back_to_me_when_usage_omits_plan(monk
     assert details["source"] == "backend-api/me"
 
 
+def test_chatgpt_me_paid_workspace_beats_personal_usage_free(monkeypatch):
+    account_id = "acct-personal-usage-free"
+    paid_workspace_id = "workspace-paid-plus"
+
+    def _fake_get(url, **_kwargs):
+        if url in {payment.ACCOUNTS_CHECK_URL, payment.SUBSCRIPTIONS_URL}:
+            return _JsonResponse({}, status_code=503)
+        if url == payment.WHAM_USAGE_URL:
+            return _JsonResponse({"account_id": account_id, "plan_type": "free"})
+        if url.endswith("/backend-api/me"):
+            return _JsonResponse({
+                "plan_type": "free",
+                "orgs": {
+                    "data": [{
+                        "id": paid_workspace_id,
+                        "settings": {"workspace_plan_type": "plus"},
+                    }],
+                },
+            })
+        raise AssertionError(f"unexpected endpoint: {url}")
+
+    monkeypatch.setattr(payment.cffi_requests, "get", _fake_get)
+    monkeypatch.setattr(payment.time, "sleep", lambda _seconds: None)
+    account = type(
+        "AccountStub",
+        (),
+        {"access_token": "token", "id_token": "", "extra": {"account_id": account_id}},
+    )()
+
+    details = payment.fetch_subscription_status_details(account)
+
+    assert details["account_type"] == "plus"
+    assert details["subscription_status"] == "active"
+    assert details["account_type_source"] == "backend-api/me"
+    assert details["plans"][-1]["workspace_id"] == paid_workspace_id
+
+
 def test_chatgpt_unknown_plan_preserves_its_raw_code(monkeypatch):
     account_id = "acct-future-plan"
 

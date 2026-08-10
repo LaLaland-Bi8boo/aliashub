@@ -10121,16 +10121,17 @@ def fetch_subscription_status_details(account: Account, proxy: Optional[str] = N
     if usage_observation:
         usage_observation = dict(usage_observation)
         usage_observation["evidence_path"] = "response.plan_type"
-        return _confirmed_subscription_details(
-            usage_observation,
-            account_id=account_id,
-            plans=authoritative_plans + [usage_observation],
-            usage=usage_data,
-            accounts_check=accounts_check_data,
-            subscriptions=subscriptions_data,
-            trial_negative_authoritative=trial_negative_authoritative,
-            trial_eligibility_source=trial_eligibility_source,
-        )
+        if usage_observation.get("plan_family") != "free":
+            return _confirmed_subscription_details(
+                usage_observation,
+                account_id=account_id,
+                plans=authoritative_plans + [usage_observation],
+                usage=usage_data,
+                accounts_check=accounts_check_data,
+                subscriptions=subscriptions_data,
+                trial_negative_authoritative=trial_negative_authoritative,
+                trial_eligibility_source=trial_eligibility_source,
+            )
 
     me_data = None
     me_details: dict[str, Any] = {"status": "unknown", "plans": []}
@@ -10171,7 +10172,7 @@ def fetch_subscription_status_details(account: Account, proxy: Optional[str] = N
         ),
         None,
     )
-    if me_observation:
+    if me_observation and me_observation.get("plan_family") != "free":
         me_observation = dict(me_observation)
         me_observation["evidence_path"] = "response.plan_type|orgs[].settings.workspace_plan_type"
         return _confirmed_subscription_details(
@@ -10180,6 +10181,37 @@ def fetch_subscription_status_details(account: Account, proxy: Optional[str] = N
             plans=authoritative_plans + list(me_details.get("plans") or []),
             me=me_data,
             usage=usage_data,
+            accounts_check=accounts_check_data,
+            subscriptions=subscriptions_data,
+            trial_negative_authoritative=trial_negative_authoritative,
+            trial_eligibility_source=trial_eligibility_source,
+        )
+
+    if usage_observation:
+        return _confirmed_subscription_details(
+            usage_observation,
+            account_id=account_id,
+            plans=(
+                authoritative_plans
+                + [usage_observation]
+                + list(me_details.get("plans") or [])
+            ),
+            me=me_data,
+            usage=usage_data,
+            accounts_check=accounts_check_data,
+            subscriptions=subscriptions_data,
+            trial_negative_authoritative=trial_negative_authoritative,
+            trial_eligibility_source=trial_eligibility_source,
+        )
+
+    if me_observation:
+        me_observation = dict(me_observation)
+        me_observation["evidence_path"] = "response.plan_type|orgs[].settings.workspace_plan_type"
+        return _confirmed_subscription_details(
+            me_observation,
+            account_id=account_id,
+            plans=authoritative_plans + list(me_details.get("plans") or []),
+            me=me_data,
             accounts_check=accounts_check_data,
             subscriptions=subscriptions_data,
             trial_negative_authoritative=trial_negative_authoritative,
