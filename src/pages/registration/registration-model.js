@@ -24,10 +24,55 @@ export function initialAccountPageSize() {
   }
 }
 
+function accountIsPlus(item = {}) {
+  const text = [
+    item.account_type,
+    item.account_type_raw,
+    item.plan,
+    item.plan_name,
+    item.plan_state,
+  ].map((value) => String(value || "").trim().toLowerCase()).join(" ");
+  return /(?:^|[^a-z0-9])(?:plus|premium)(?:[^a-z0-9]|$)|chatgptplus/.test(text);
+}
+
+export function accountPlusDate(item = {}) {
+  if (!accountIsPlus(item)) return "";
+  const value = String(item.plus_at || "").trim();
+  return Number.isFinite(Date.parse(value)) ? value : "";
+}
+
+export function sortRegisteredAccounts(items = []) {
+  return [...items].sort((left, right) => {
+    const leftPlus = accountIsPlus(left);
+    const rightPlus = accountIsPlus(right);
+    if (leftPlus !== rightPlus) return rightPlus ? 1 : -1;
+    const leftPlusAt = Date.parse(accountPlusDate(left) || "") || 0;
+    const rightPlusAt = Date.parse(accountPlusDate(right) || "") || 0;
+    if (leftPlusAt !== rightPlusAt) return rightPlusAt - leftPlusAt;
+    return 0;
+  });
+}
+
+export function registrationBaseOptions(account) {
+  const bases = Array.isArray(account?.bases) ? account.bases : [];
+  return account?.registration_mode === "direct"
+    ? bases.filter((item) => !item.registration_disabled)
+    : bases;
+}
+
 export function preferredBase(account) {
-  return account?.bases.find((item) => item.registration_state === "available")
-    || account?.bases.find((item) => item.registration_state === "warning")
-    || account?.bases[0];
+  const bases = registrationBaseOptions(account);
+  return bases.find((item) => item.registration_state === "available")
+    || bases.find((item) => item.registration_state === "warning")
+    || bases[0];
+}
+
+export function directRegistrationBases(account, baseAddressId) {
+  if (account?.registration_mode !== "direct") return [];
+  const bases = registrationBaseOptions(account);
+  const selectedIndex = bases.findIndex((item) => String(item.id) === String(baseAddressId));
+  if (selectedIndex < 0) return [];
+  return bases.slice(selectedIndex);
 }
 
 export function occupiedAliasInfo(item) {
@@ -51,7 +96,20 @@ export function baseOptionLabel(item) {
       ? "自定义域名"
     : item.strategy === "icloud_mail_alias" ? "邮箱别名" : "";
   const occupied = occupiedAliasInfo(item);
-  const state = item.registration_state === "in_progress"
+  const failureCount = Math.max(0, Number(item.registration_failure_count) || 0);
+  const failure = failureCount && !occupied.count
+    ? (failureCount > 1 ? `注册失败 ${failureCount} 次` : "注册失败")
+    : "";
+  const pickupState = item.registration_state === "pickup_unknown"
+    ? "取件站状态未知 · 禁止注册"
+    : item.pickup_status === "ready"
+      ? "取件站待销售 · 禁止注册"
+      : item.pickup_status === "sold"
+        ? "取件站已售出 · 禁止注册"
+        : item.pickup_status === "disabled"
+          ? "取件站已停用 · 禁止注册"
+          : item.registration_state === "pickup_listed" ? "取件站库存 · 禁止注册" : "";
+  const state = pickupState || (item.registration_state === "in_progress"
     ? "注册进行中"
     : item.registration_state === "used"
       ? "已用于注册"
@@ -61,8 +119,8 @@ export function baseOptionLabel(item) {
         ? "疑似已占用"
         : item.registration_state === "warning"
           ? "有占用冲突"
-          : item.registration_success_count ? `已成功 ${item.registration_success_count}` : "";
-  const details = [occupied.count ? `注册占用 ${occupied.count}` : "", type, state].filter(Boolean).join(" · ");
+          : item.registration_success_count ? `已成功 ${item.registration_success_count}` : "");
+  const details = [occupied.count ? `注册占用 ${occupied.count}` : "", type, failure, state].filter(Boolean).join(" · ");
   return details ? `${item.address}（${details}）` : item.address;
 }
 

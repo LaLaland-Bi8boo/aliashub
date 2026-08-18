@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { generateSplits, persistInboxScanResult } from "./account-service.js";
+import { generateSplits, parseJson, persistInboxScanResult } from "./account-service.js";
 import { isIcloudImportedStrategy } from "./address-generator.js";
 import {
   getSetting,
@@ -31,6 +31,9 @@ import {
 } from "./registration-proxy.js";
 import { parseLocalAccountImport } from "./registration-import.js";
 import { serializeInboxLinkEntry } from "./inbox-link-pool.js";
+import { checkoutTypeFromAccount, probeCheckoutType } from "./checkout-type-probe.js";
+import { JP_ZERO_TRIAL_EVIDENCE, probeJpTrialEligibility } from "./jp-trial-eligibility-probe.js";
+import { MOMO_CHECK_EVIDENCES, probeMomoEligibility } from "./momo-eligibility-probe.js";
 
 const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled", "interrupted"]);
 const ACTIVE_STATUSES = new Set(["pending", "claimed", "running", "paused", "cancel_requested"]);
@@ -38,6 +41,37 @@ const RELEASABLE_JOB_STATUSES = new Set(["queued", "pending", "claimed", "runnin
 const ACCOUNT_STATUS_REFRESH_COOLDOWN_MS = 15 * 60 * 1000;
 const ACCOUNT_STATUS_REFRESH_BATCH_SIZE = 20;
 const REGISTRATION_JOB_SYNC_CONCURRENCY = 3;
+const CHECKOUT_CHECK_CONCURRENCY = 2;
+const CHECKOUT_ACCOUNT_COOLDOWN_MS = 30 * 60 * 1000;
+const TRIAL_CHECK_CONCURRENCY = 2;
+const MOMO_CHECK_CONCURRENCY = 2;
+const PICKUP_REGISTRATION_BLOCKED_STATUSES = new Set(["ready", "sold", "disabled"]);
+
+function pickupInventoryByEmail(items = []) {
+  const inventory = new Map();
+  for (const item of items) {
+    const email = String(item?.email || "").trim().toLowerCase();
+    const status = String(item?.status || "").trim().toLowerCase();
+    if (email && PICKUP_REGISTRATION_BLOCKED_STATUSES.has(status)) inventory.set(email, status);
+  }
+  return inventory;
+}
+
+function directIcloudRegistrationState(jobs = []) {
+  const occupied = occupiedAliasHistory(jobs);
+  const active = jobs.some((job) => RELEASABLE_JOB_STATUSES.has(String(job.status || "")));
+  const completed = jobs.some((job) => job.status === "completed");
+  const disabled = active || completed || occupied.count > 0;
+  return {
+    active,
+    completed,
+    disabled,
+    occupied,
+    state: active ? "in_progress"
+      : occupied.count > 0 ? "occupied"
+        : completed ? "used" : "available",
+  };
+}
 
 function normalizeSelectedIds(input, label, maximum = 500) {
   if (!Array.isArray(input?.ids)) {
@@ -204,9 +238,43 @@ export function browserUrlWithPassword(browserUrl, password) {
   return `${base}#${params.toString()}`;
 }
 
+function plusDateFromAccount(item = {}, plusMail = null) {
+  const overview = item.overview && typeof item.overview === "object" && !Array.isArray(item.overview)
+    ? item.overview : {};
+  const candidates = [
+    item.plus_at,
+    item.plusAt,
+    item.plus_started_at,
+    item.plusStartedAt,
+    item.subscription_started_at,
+    item.subscriptionStartedAt,
+    item.subscription_start_at,
+    item.subscriptionStartAt,
+    item.plan_started_at,
+    item.planStartedAt,
+    overview.plus_at,
+    overview.plus_started_at,
+    overview.subscription_started_at,
+    overview.subscription_start_at,
+    overview.plan_started_at,
+    plusMail?.received_at,
+  ];
+  return candidates
+    .map((value) => safeRemoteText(value, 80))
+    .find((value) => Number.isFinite(Date.parse(value))) || "";
+}
+
+const PLUS_MAIL_CONFIRMATION_MAX_AGE_MS = 35 * 24 * 60 * 60 * 1_000;
+
+function plusConfirmationAccountId(message = {}) {
+  const text = [message.subject, message.preview, message.body].map((value) => String(value || "")).join(" ");
+  const match = text.match(/chatgpt\.com\/account\/manage\?[^\s<>"']*\baccount_id=([a-z0-9-]{8,})/i);
+  return match?.[1] || "";
+}
+
 function plusMailEvidenceByEmail(db) {
   const rows = db.prepare(`
-    SELECT lower(recipient_address) AS email, subject, received_at
+    SELECT lower(recipient_address) AS email, subject, preview, body, received_at
     FROM mail_messages
     WHERE recipient_address <> ''
       AND lower(subject || ' ' || preview || ' ' || body) LIKE '%chatgpt plus%'
@@ -214,6 +282,7 @@ function plusMailEvidenceByEmail(db) {
         lower(subject || ' ' || preview || ' ' || body) LIKE '%successfully subscribed%'
         OR lower(subject || ' ' || preview || ' ' || body) LIKE '%successfully registered%'
         OR subject || ' ' || preview || ' ' || body LIKE '%正常に登録%'
+        OR subject || ' ' || preview || ' ' || body LIKE '%구독했습니다%'
         OR subject || ' ' || preview || ' ' || body LIKE '%成功订阅%'
         OR subject || ' ' || preview || ' ' || body LIKE '%订阅成功%'
       )
@@ -221,9 +290,80 @@ function plusMailEvidenceByEmail(db) {
   `).all();
   const evidence = new Map();
   for (const row of rows) {
-    if (row.email && !evidence.has(row.email)) evidence.set(row.email, row);
+    if (row.email && !evidence.has(row.email)) {
+      evidence.set(row.email, {
+        email: row.email,
+        subject: row.subject,
+        received_at: row.received_at,
+        account_id: plusConfirmationAccountId(row),
+      });
+    }
   }
   return evidence;
+}
+
+function plusMailMatchesAccount(mail, account = {}) {
+  const mailAccountId = safeRemoteText(mail?.account_id, 100);
+  if (!mailAccountId) return false;
+  const accountIds = new Set([
+    account?.user_id,
+    accountCredential(account, ["account_id", "accountId", "chatgpt_account_id", "chatgptAccountId"]),
+  ].map((value) => safeRemoteText(value, 100)).filter(Boolean));
+  return accountIds.has(mailAccountId);
+}
+
+function isAccountDeletionMail(message = {}) {
+  const subject = String(message.subject || "");
+  const preview = String(message.preview || "");
+  const body = String(message.body || "");
+  const text = `${subject} ${preview} ${body}`.replace(/\s+/g, " ").trim();
+  if (!text) return false;
+  const sender = String(message.sender_address || "").trim().toLowerCase();
+  const trustedSender = /(?:^|@)(?:[a-z0-9-]+\.)*(?:openai|chatgpt)\.(?:com|net)(?:$|>)/i.test(sender);
+  if (!trustedSender) return false;
+  const accountWord = "(?:account|user|账号|账户|用户)";
+  const deletionWord = "(?:deleted|deactivated|disabled|suspended|banned|terminated|removed|删除|停用|禁用|暂停|封禁)";
+  return new RegExp(`${accountWord}.{0,120}${deletionWord}|${deletionWord}.{0,120}${accountWord}`, "i").test(text);
+}
+
+function accountDeletionMailEvidenceByEmail(db, sourceIds = [], emails = []) {
+  if (!sourceIds.length || !emails.length) return new Map();
+  const sourcePlaceholders = sourceIds.map(() => "?").join(",");
+  const emailPlaceholders = emails.map(() => "?").join(",");
+  const rows = db.prepare(`
+    SELECT mail_messages.recipient_address, mail_messages.sender_address,
+      mail_messages.subject, mail_messages.preview, mail_messages.body,
+      mail_messages.received_at,
+      lower(CASE WHEN trim(mail_messages.recipient_address) <> ''
+        THEN mail_messages.recipient_address ELSE COALESCE(addresses.address, '') END) AS matched_email
+    FROM mail_messages
+    LEFT JOIN addresses ON addresses.id = mail_messages.address_id
+    WHERE mail_messages.account_id IN (${sourcePlaceholders})
+      AND lower(CASE WHEN trim(mail_messages.recipient_address) <> ''
+        THEN mail_messages.recipient_address ELSE COALESCE(addresses.address, '') END) IN (${emailPlaceholders})
+    ORDER BY mail_messages.received_at DESC, mail_messages.id DESC
+  `).all(...sourceIds, ...emails);
+  const evidence = new Map();
+  for (const row of rows) {
+    const email = String(row.matched_email || "").trim().toLowerCase();
+    if (email && !evidence.has(email) && isAccountDeletionMail(row)) evidence.set(email, row);
+  }
+  return evidence;
+}
+
+function recentPlusMailConfirmation(mail, now = Date.now()) {
+  const receivedAt = Date.parse(String(mail?.received_at || ""));
+  return Number.isFinite(receivedAt)
+    && receivedAt <= now + 5 * 60 * 1_000
+    && now - receivedAt <= PLUS_MAIL_CONFIRMATION_MAX_AGE_MS;
+}
+
+function shouldPromotePlusMail(mail, account, signals) {
+  if (!mail || signals.account_type === "plus") return false;
+  const code = normalizeCheckCode(signals.status_code);
+  if (SUBSCRIPTION_STATUS_CODES.has(code)) return false;
+  if (signals.detection_status !== "confirmed") return true;
+  return recentPlusMailConfirmation(mail) && plusMailMatchesAccount(mail, account);
 }
 
 const PLAN_TYPE_ALIASES = new Map([
@@ -375,6 +515,7 @@ function isAuthoritativeStatusSource(source, { terminal = false } = {}) {
   const normalized = safeAccountCheckText(source, 120).toLowerCase();
   if (/^(?:backend[-_]?api)(?:[/:_-]|$)/.test(normalized)) return true;
   if (normalized === "registration-refresh") return true;
+  if (terminal && normalized === "mail/account-deletion") return true;
   return !terminal && normalized === "api/auth/session+jwt";
 }
 
@@ -933,7 +1074,8 @@ function accountStatusSignals(item = {}, persistedOutcome = null) {
     overview.credential_status,
     overview.credential_state,
   ));
-  if (credentialEvidence && CREDENTIAL_EXPIRED_CODES.has(credentialEvidence.code)) credentialStatus = "expired";
+  if (terminalEvidence) credentialStatus = "revoked";
+  else if (credentialEvidence && CREDENTIAL_EXPIRED_CODES.has(credentialEvidence.code)) credentialStatus = "expired";
   else if (credentialEvidence && CREDENTIAL_REVOKED_CODES.has(credentialEvidence.code)) credentialStatus = "revoked";
   else if (credentialStatus === "unknown" && confirmedActive) credentialStatus = "valid";
   else if (credentialStatus === "unknown" && !anyCredentialAvailable) credentialStatus = "missing";
@@ -1317,6 +1459,30 @@ function assertAccessTokenRefreshTask(task, expectedTaskId = "") {
   return { taskId, status };
 }
 
+function checkoutCheckError(value) {
+  const source = value?.message || value?.error || value || "Checkout 检测失败";
+  return safeRemoteText(redactProxySecrets(source)
+    .replace(/\b(?:Bearer\s+)?eyJ[A-Za-z0-9._-]+/gi, "[REDACTED]")
+    .replace(/\b(?:cs_live|oaics)_[A-Za-z0-9_-]+/gi, "[REDACTED]"), 180)
+    || "Checkout 检测失败";
+}
+
+function trialCheckError(value) {
+  const source = value?.message || value?.error || value || "日本 0 元 Checkout 检测失败";
+  return safeRemoteText(redactProxySecrets(source)
+    .replace(/\b(?:Bearer\s+)?eyJ[A-Za-z0-9._-]+/gi, "[REDACTED]")
+    .replace(/\b(?:cs_(?:live|test)|oaics)_[A-Za-z0-9_-]+/gi, "[REDACTED]"), 180)
+    || "日本 0 元 Checkout 检测失败";
+}
+
+function momoCheckError(value) {
+  const source = value?.message || value?.error || value || "MoMo 资格检测失败";
+  return safeRemoteText(redactProxySecrets(source)
+    .replace(/\b(?:Bearer\s+)?eyJ[A-Za-z0-9._-]+/gi, "[REDACTED]")
+    .replace(/\b(?:cs_(?:live|test)|pk_(?:live|test))_[A-Za-z0-9_-]+/gi, "[REDACTED]"), 180)
+    || "MoMo 资格检测失败";
+}
+
 function publicPasswordSetupTask(task) {
   const taskId = String(task.task_id || task.id || "");
   const mappedStatus = statusFromExternal(task.status);
@@ -1417,7 +1583,7 @@ function identityFromEvents(events = []) {
 }
 
 export class RegistrationService {
-  constructor({ db, graph, client, publicBaseUrl, mailboxBaseUrl, browserUrl, browserPassword, icloudLink = null, inboxLinkMailboxes = null, nfapiCredentialSync = null } = {}) {
+  constructor({ db, graph, client, publicBaseUrl, mailboxBaseUrl, browserUrl, browserPassword, icloudLink = null, inboxLinkMailboxes = null, pickup = null, nfapiCredentialSync = null, checkoutProbe = probeCheckoutType, checkoutProxyResolver = null, trialProbe = probeJpTrialEligibility, trialProxyResolver = null, momoProbe = probeMomoEligibility, momoProxyResolver = null } = {}) {
     this.db = db;
     this.graph = graph;
     this.client = client;
@@ -1429,8 +1595,22 @@ export class RegistrationService {
     );
     this.icloudLink = icloudLink;
     this.inboxLinkMailboxes = inboxLinkMailboxes;
+    this.pickup = pickup;
     this.scanPromises = new Map();
     this.accountAccessTokenRefreshes = new Map();
+    this.accountCheckoutChecks = new Map();
+    this.accountCheckoutCooldowns = new Map();
+    this.checkoutProbe = checkoutProbe;
+    this.checkoutProxyResolver = checkoutProxyResolver;
+    this.checkoutProxyCache = { proxy: "", expiresAt: 0 };
+    this.accountTrialChecks = new Map();
+    this.trialProbe = trialProbe;
+    this.trialProxyResolver = trialProxyResolver;
+    this.trialProxyCache = { proxy: "", expiresAt: 0 };
+    this.accountMomoChecks = new Map();
+    this.momoProbe = momoProbe;
+    this.momoProxyResolver = momoProxyResolver;
+    this.momoProxyCache = { proxy: "", expiresAt: 0 };
     this.accountStatusRefreshAttempts = new Map();
     this.accountStatusCheckOutcomes = new Map();
     this.nfapiCredentialSync = nfapiCredentialSync;
@@ -1443,6 +1623,25 @@ export class RegistrationService {
       }
     } catch {
       // Keep the in-memory Map fallback for callers using an older test database.
+    }
+  }
+
+  pickupRegistrationProtectionEnabled() {
+    return Boolean(this.pickup?.registrationProtectionEnabled?.());
+  }
+
+  async pickupRegistrationInventory({ required = false } = {}) {
+    if (!this.pickupRegistrationProtectionEnabled()) return new Map();
+    try {
+      const result = await this.pickup.listStatuses();
+      return pickupInventoryByEmail(result?.items);
+    } catch (error) {
+      if (!required) return null;
+      throw Object.assign(new Error("取件站库存状态读取失败，为避免误用售卖邮箱，已停止创建注册任务"), {
+        status: 409,
+        code: "PICKUP_REGISTRATION_STATUS_UNAVAILABLE",
+        cause: error,
+      });
     }
   }
 
@@ -1460,15 +1659,23 @@ export class RegistrationService {
 
   async syncLatestNfapiCredentials(accounts) {
     if (!this.nfapiCredentialSync) return { attempted: 0, synced: 0, failed: 0, items: [] };
-    const result = await this.nfapiCredentialSync.syncAccounts(accounts);
-    if (result.failed > 0) {
-      const failed = result.items.find((item) => !item.ok);
-      throw Object.assign(new Error(failed?.error || "NFapi 最新凭据同步失败"), {
-        status: 502,
-        code: "NFAPI_CREDENTIAL_SYNC_FAILED",
-      });
+    try {
+      const result = await this.nfapiCredentialSync.syncAccounts(accounts);
+      return result && typeof result === "object" ? result : {
+        attempted: accounts.length,
+        synced: 0,
+        failed: accounts.length,
+        items: [],
+      };
+    } catch (error) {
+      return {
+        attempted: accounts.length,
+        synced: 0,
+        failed: accounts.length,
+        items: [],
+        error: safeAccountCheckText(error, 180) || "NFapi 最新凭据同步失败",
+      };
     }
-    return result;
   }
 
   requireConnectorKey(req, res, next) {
@@ -1483,6 +1690,9 @@ export class RegistrationService {
   saveProxyPool(input) {
     const proxies = parseProxyPool(input);
     setSetting(this.db, "registration_proxy_pool", JSON.stringify(proxies));
+    this.checkoutProxyCache = { proxy: "", expiresAt: 0 };
+    this.trialProxyCache = { proxy: "", expiresAt: 0 };
+    this.momoProxyCache = { proxy: "", expiresAt: 0 };
     return {
       count: proxies.length,
       proxies,
@@ -1553,6 +1763,8 @@ export class RegistrationService {
   }
 
   async options() {
+    const pickupInventory = await this.pickupRegistrationInventory();
+    const pickupStatusUnavailable = this.pickupRegistrationProtectionEnabled() && pickupInventory === null;
     const baseJobs = this.db.prepare(`
       SELECT registration_jobs.id, registration_jobs.email, registration_jobs.status, registration_jobs.stage,
         registration_jobs.message, registration_jobs.failure_reason, registration_jobs.created_at,
@@ -1569,52 +1781,65 @@ export class RegistrationService {
     `);
     const accounts = this.db.prepare("SELECT * FROM source_accounts WHERE status = 'connected' AND provider IN ('microsoft', 'google', 'icloud', 'icloud_link') ORDER BY updated_at DESC").all().map((account) => {
       const direct = account.provider === "icloud";
-      const bases = this.db.prepare("SELECT id, address, kind, label, strategy FROM addresses WHERE account_id = ? AND kind IN ('primary', 'official') AND status = 'active' ORDER BY kind = 'primary' DESC, created_at")
+      const bases = this.db.prepare("SELECT id, address, kind, label, strategy FROM addresses WHERE account_id = ? AND kind IN ('primary', 'official') AND status = 'active' ORDER BY kind = 'primary' DESC, created_at, id")
         .all(account.id)
         .filter((base) => !direct || base.kind === "primary" || isIcloudImportedStrategy(base.strategy));
-      return {
-        id: account.id,
-        email: account.email,
-        display_name: account.display_name,
-        provider: account.provider,
-        registration_mode: direct ? "direct" : "split",
-        max_registration_count: direct ? 1 : 20,
-        bases: bases.map((base) => {
-          const jobs = baseJobs.all(base.id, base.id, base.id);
-          const latest = jobs[0];
-          const occupied = occupiedAliasHistory(jobs);
-          const conflictCount = occupied.count;
-          const activeDirectJob = direct && jobs.some((job) => RELEASABLE_JOB_STATUSES.has(String(job.status || "")));
-          const completedDirectJob = direct && jobs.some((job) => job.status === "completed");
-          const occupiedDirectAlias = direct && conflictCount > 0;
-          const registrationState = activeDirectJob ? "in_progress"
-            : occupiedDirectAlias ? "occupied"
-            : completedDirectJob ? "used"
-              : conflictCount >= 2 ? "likely_exhausted" : (conflictCount === 1 ? "warning" : "available");
-          return {
-            ...base,
-            registration_state: registrationState,
-            registration_disabled: activeDirectJob || completedDirectJob || occupiedDirectAlias,
-            already_exists_count: conflictCount,
-            occupied_alias_count: conflictCount,
-            occupied_aliases: occupied.aliases,
-            occupied_alias_last_seen_at: occupied.lastSeenAt,
-            last_occupied_alias_at: occupied.lastSeenAt,
-            registration_success_count: jobs.filter((job) => job.status === "completed").length,
-            last_registration_status: latest?.status || "",
-            registration_hint: activeDirectJob
-              ? "这个 iCloud 地址已有进行中的注册任务，请等待任务结束。"
-              : occupiedDirectAlias
-                ? "这个 iCloud 地址已被目标站占用，不能重复注册；请导入新的地址。"
-              : completedDirectJob
+      const optionBases = bases.map((base) => {
+        const jobs = baseJobs.all(base.id, base.id, base.id);
+        const latest = jobs[0];
+        const failedJobs = jobs.filter((job) => job.status === "failed");
+        const directState = direct ? directIcloudRegistrationState(jobs) : null;
+        const occupied = directState?.occupied || occupiedAliasHistory(jobs);
+        const conflictCount = occupied.count;
+        const pickupStatus = pickupInventory?.get(String(base.address || "").toLowerCase()) || "";
+        const pickupBlocked = direct && (pickupStatusUnavailable || Boolean(pickupStatus));
+        const registrationState = pickupBlocked
+          ? (pickupStatusUnavailable ? "pickup_unknown" : "pickup_listed")
+          : directState?.state
+          || (conflictCount >= 2 ? "likely_exhausted" : (conflictCount === 1 ? "warning" : "available"));
+        return {
+          ...base,
+          registration_state: registrationState,
+          registration_disabled: pickupBlocked || Boolean(directState?.disabled),
+          pickup_status: pickupStatus,
+          pickup_registration_blocked: pickupBlocked,
+          already_exists_count: conflictCount,
+          occupied_alias_count: conflictCount,
+          occupied_aliases: occupied.aliases,
+          occupied_alias_last_seen_at: occupied.lastSeenAt,
+          last_occupied_alias_at: occupied.lastSeenAt,
+          registration_success_count: jobs.filter((job) => job.status === "completed").length,
+          registration_failure_count: failedJobs.length,
+          last_registration_failure_at: failedJobs[0]?.finished_at
+            || failedJobs[0]?.updated_at
+            || failedJobs[0]?.created_at
+            || "",
+          last_registration_status: latest?.status || "",
+          registration_hint: pickupStatusUnavailable && direct
+            ? "取件站库存状态暂时无法确认，为避免误用售卖邮箱，当前禁止注册。"
+            : pickupStatus && direct
+              ? "这个邮箱已在取件站库存中，必须先从取件站删除后才能用于注册。"
+              : directState?.active
+            ? "这个 iCloud 地址已有进行中的注册任务，请等待任务结束。"
+            : conflictCount > 0 && direct
+              ? "这个 iCloud 地址已被目标站占用，不能重复注册；请导入新的地址。"
+              : directState?.completed
                 ? "这个 iCloud 地址已经用于成功注册；请导入新的地址继续注册。"
                 : direct
                   ? "iCloud 地址会直接用于注册，不会生成 +tag 分裂地址。"
                   : registrationState === "likely_exhausted"
                     ? "这个基础地址已标记多个目标站占用别名，建议更换基础地址。"
                     : (registrationState === "warning" ? "这个基础地址已标记目标站占用别名；再次注册请优先更换后缀。" : ""),
-          };
-        }),
+        };
+      });
+      return {
+        id: account.id,
+        email: account.email,
+        display_name: account.display_name,
+        provider: account.provider,
+        registration_mode: direct ? "direct" : "split",
+        max_registration_count: direct ? optionBases.filter((base) => !base.registration_disabled).length : 20,
+        bases: optionBases,
       };
     });
     const proxies = this.getProxyPool();
@@ -1636,13 +1861,16 @@ export class RegistrationService {
     if (!new Set(["source", "inbox_link"]).has(mailboxMode)) {
       throw Object.assign(new Error("注册邮箱来源无效"), { status: 400 });
     }
-    const requestedCount = Number(input.count);
+    const requestedCount = input.count === undefined || input.count === null || input.count === ""
+      ? 1
+      : Number(input.count);
     if (mailboxMode === "inbox_link" && (!Number.isSafeInteger(requestedCount) || requestedCount < 1 || requestedCount > 200)) {
       throw Object.assign(new Error("链接取件注册数量必须是 1 到 200 的整数"), { status: 400 });
     }
-    const count = mailboxMode === "inbox_link"
-      ? requestedCount
-      : Math.max(1, Math.min(20, requestedCount || 1));
+    if (mailboxMode === "source" && (!Number.isSafeInteger(requestedCount) || requestedCount < 1)) {
+      throw Object.assign(new Error("注册数量必须是正整数"), { status: 400 });
+    }
+    let count = requestedCount;
     const addressMode = String(input.addressMode || "split").trim().toLowerCase();
     if (!new Set(["split", "base"]).has(addressMode)) {
       throw Object.assign(new Error("注册邮箱模式无效"), { status: 400 });
@@ -1697,11 +1925,9 @@ export class RegistrationService {
     const base = this.db.prepare("SELECT * FROM addresses WHERE id = ? AND account_id = ? AND kind IN ('primary', 'official') AND status = 'active'").get(Number(input.baseAddressId), account.id);
     if (!base) throw Object.assign(new Error("请选择可用的基础地址"), { status: 400 });
     const directIcloud = account.provider === "icloud";
+    if (!directIcloud) count = Math.min(20, count);
     if (directIcloud && base.kind === "official" && !isIcloudImportedStrategy(base.strategy)) {
       throw Object.assign(new Error("请选择已导入的 iCloud 地址"), { status: 400 });
-    }
-    if (directIcloud && count !== 1) {
-      throw Object.assign(new Error("iCloud 地址每次只能提交 1 个注册任务"), { status: 400 });
     }
     if (directIcloud && customSuffix) {
       throw Object.assign(new Error("iCloud 地址不支持 Plus 分裂后缀，请直接选择已导入的地址"), { status: 400 });
@@ -1715,8 +1941,22 @@ export class RegistrationService {
     const proxies = resolveJobProxies(input, this.getProxyPool());
     let addresses;
     if (directIcloud) {
-      const existing = this.db.prepare(`
-        SELECT status, stage, message, failure_reason
+      const pickupInventory = await this.pickupRegistrationInventory({ required: true });
+      const directBases = this.db.prepare(`
+        SELECT * FROM addresses
+        WHERE account_id = ? AND kind IN ('primary', 'official') AND status = 'active'
+        ORDER BY kind = 'primary' DESC, created_at, id
+      `).all(account.id).filter((item) => item.kind === "primary" || isIcloudImportedStrategy(item.strategy));
+      const selectedIndex = directBases.findIndex((item) => item.id === base.id);
+      if (selectedIndex < 0) throw Object.assign(new Error("请选择已导入的 iCloud 地址"), { status: 400 });
+      if (pickupInventory.has(String(base.address || "").toLowerCase())) {
+        throw Object.assign(new Error("这个邮箱已在取件站售卖库存中，不能用于注册；请先从取件站删除"), {
+          status: 409,
+          code: "PICKUP_EMAIL_REGISTRATION_BLOCKED",
+        });
+      }
+      const directBaseJobs = this.db.prepare(`
+        SELECT email, status, stage, message, failure_reason, created_at, updated_at, finished_at
         FROM registration_jobs
         WHERE base_address_id = ?
           OR (
@@ -1724,21 +1964,25 @@ export class RegistrationService {
             AND address_id = ?
           )
         ORDER BY created_at DESC, id DESC
-      `).all(base.id, base.id);
-      const occupied = existing.find((job) => registrationFailureReason(job) === OCCUPIED_ALIAS_FAILURE_REASON);
-      if (occupied) {
+      `);
+      const selectedState = directIcloudRegistrationState(directBaseJobs.all(base.id, base.id));
+      if (selectedState.occupied.count > 0) {
         throw Object.assign(new Error("这个 iCloud 地址已被目标站占用，不能重复注册，请导入新的地址"), { status: 409 });
       }
-      const activeOrCompleted = existing.find((job) => (
-        RELEASABLE_JOB_STATUSES.has(String(job.status || "")) || job.status === "completed"
-      ));
-      if (activeOrCompleted) {
-        const message = activeOrCompleted.status === "completed"
+      if (selectedState.active || selectedState.completed) {
+        const message = selectedState.completed
           ? "这个 iCloud 地址已经用于成功注册，请导入新的地址"
           : "这个 iCloud 地址已有进行中的注册任务";
         throw Object.assign(new Error(message), { status: 409 });
       }
-      addresses = [base];
+      const available = directBases.slice(selectedIndex).filter((item) => (
+        !pickupInventory.has(String(item.address || "").toLowerCase())
+          && !directIcloudRegistrationState(directBaseJobs.all(item.id, item.id)).disabled
+      ));
+      if (count > available.length) {
+        throw Object.assign(new Error(`从所选 iCloud 地址往下仅有 ${available.length} 个可用地址，最多可注册 ${available.length} 个`), { status: 409 });
+      }
+      addresses = available.slice(0, count);
     } else if (addressMode === "base") {
       const existing = this.db.prepare(`
         SELECT status, stage, message, failure_reason
@@ -1777,8 +2021,7 @@ export class RegistrationService {
     const registrationSerialKey = account.provider === "icloud_link"
       ? `icloud-link:${crypto.createHash("sha256").update(account.email.toLowerCase()).digest("hex").slice(0, 24)}`
       : "";
-    for (let index = 0; index < addresses.length; index += 1) {
-      const address = addresses[index];
+    const pendingJobs = this.db.transaction(() => addresses.map((address, index) => {
       const proxyTemplate = proxies.length ? proxies[index % proxies.length] : "";
       const proxy = materializeProxySession(proxyTemplate, usedProxySessions);
       const now = nowIso();
@@ -1790,7 +2033,7 @@ export class RegistrationService {
       `).run(
         account.id,
         address.id,
-        base.id,
+        directIcloud ? address.id : base.id,
         address.address,
         browserMode,
         maskProxy(proxy),
@@ -1800,6 +2043,9 @@ export class RegistrationService {
         now,
       );
       const jobId = Number(result.lastInsertRowid);
+      return { address, jobId, proxy };
+    }))();
+    for (const { address, jobId, proxy } of pendingJobs) {
       try {
         const task = await this.client.createTask({
           platform: "chatgpt",
@@ -2028,6 +2274,21 @@ export class RegistrationService {
     return synced.map(publicRegistrationJob);
   }
 
+  jobCounts() {
+    const counts = { total: 0 };
+    this.db.prepare(`
+      SELECT status, COUNT(*) AS count
+      FROM registration_jobs
+      WHERE deleted_at IS NULL
+      GROUP BY status
+    `).all().forEach((row) => {
+      const count = Number(row.count) || 0;
+      counts[String(row.status || "unknown")] = count;
+      counts.total += count;
+    });
+    return counts;
+  }
+
   registrationQueueControl() {
     return this.client.getRegistrationQueueControl();
   }
@@ -2182,12 +2443,34 @@ export class RegistrationService {
   async taskEvents(id) {
     const row = this.getJob(id);
     if (!row) throw Object.assign(new Error("注册任务不存在"), { status: 404 });
-    if (!row.external_task_id) return [];
+    const publicJob = publicRegistrationJob(row);
+    const localFailureEvent = {
+      id: `local-failure-${row.id}`,
+      level: "error",
+      created_at: row.finished_at || row.updated_at || row.created_at,
+      message: `注册失败：${publicJob.display_message || publicJob.message || "未返回失败原因"}`,
+      detail: {
+        source: "alias_hub",
+        email: row.email,
+        stage: row.stage || "unknown",
+        failure_reason: publicJob.failure_reason || "",
+      },
+    };
+    if (!row.external_task_id) return row.status === "failed" ? [localFailureEvent] : [];
     try {
       const response = await this.client.getTaskEvents(row.external_task_id);
       const events = Array.isArray(response) ? response : response.items || response.events || [];
-      return sanitizeRegistrationRemoteValue(events);
+      const sanitized = sanitizeRegistrationRemoteValue(events);
+      return row.status === "failed" ? [...sanitized, localFailureEvent] : sanitized;
     } catch (error) {
+      if (row.status === "failed") {
+        return [localFailureEvent, {
+          id: `remote-log-error-${row.id}`,
+          level: "error",
+          created_at: nowIso(),
+          message: `远程日志读取失败：${redactProxySecrets(error?.message) || "注册服务暂时不可用"}`,
+        }];
+      }
       throw Object.assign(new Error(redactProxySecrets(error?.message) || "读取注册任务事件失败"), {
         status: Number.isInteger(Number(error?.status)) ? Number(error.status) : 502,
       });
@@ -2253,6 +2536,21 @@ export class RegistrationService {
       throw Object.assign(new Error(`无法唯一还原注册时使用的代理，拒绝${operationLabel}`), { status: 409 });
     }
     return route.primary;
+  }
+
+  registeredAccountRefreshProxy(job, proxySelection) {
+    const selection = String(proxySelection || "original").trim().toLowerCase();
+    if (selection === "original") return this.registeredAccountOriginalProxy(job, "刷新 AT");
+    const match = selection.match(/^proxy:(\d+)$/);
+    if (!match) {
+      throw Object.assign(new Error("AT 刷新代理选择无效"), { status: 400 });
+    }
+    const proxies = this.getProxyPool();
+    const index = Number(match[1]);
+    if (!Number.isSafeInteger(index) || index < 0 || index >= proxies.length) {
+      throw Object.assign(new Error("选择的 AT 刷新代理已不存在，请刷新页面后重试"), { status: 409 });
+    }
+    return proxies[index];
   }
 
   passwordSetupProxy(job) {
@@ -2514,6 +2812,27 @@ export class RegistrationService {
     `).all();
     const metadataByAccountId = new Map(this.db.prepare("SELECT * FROM registered_account_metadata").all()
       .map((item) => [String(item.external_account_id), item]));
+    let checkoutByAccountId = new Map();
+    try {
+      checkoutByAccountId = new Map(this.db.prepare("SELECT * FROM registered_account_checkout_checks").all()
+        .map((item) => [String(item.external_account_id), item]));
+    } catch {
+      // Older test databases can still list accounts before running the latest schema.
+    }
+    let trialByAccountId = new Map();
+    try {
+      trialByAccountId = new Map(this.db.prepare("SELECT * FROM registered_account_trial_checks").all()
+        .map((item) => [String(item.external_account_id), item]));
+    } catch {
+      // Older test databases can still list accounts before running the latest schema.
+    }
+    let momoByAccountId = new Map();
+    try {
+      momoByAccountId = new Map(this.db.prepare("SELECT * FROM registered_account_momo_checks").all()
+        .map((item) => [String(item.external_account_id), item]));
+    } catch {
+      // Older test databases can still list accounts before running the latest schema.
+    }
     const plusMailByEmail = plusMailEvidenceByEmail(this.db);
     const nfapiByAccountId = new Map();
     const nfapiBaseUrl = String(getSetting(this.db, "nfapi_base_url", "")).replace(/\/+$/, "");
@@ -2557,35 +2876,44 @@ export class RegistrationService {
         const passwordMetadata = passwordMetadataFromAccount(item);
         const passwordSetup = this.passwordSetupAvailability(job, item, passwordMetadata);
         const metadata = metadataByAccountId.get(String(item.id || ""));
+        const checkoutCheck = checkoutByAccountId.get(String(item.id || ""));
+        const trialCheck = trialByAccountId.get(String(item.id || ""));
+        const momoCheck = momoByAccountId.get(String(item.id || ""));
         const nfapiLink = nfapiByAccountId.get(String(item.id || ""));
         const checkOutcome = this.accountStatusCheckOutcomes.get(String(item.id || ""));
         const checkOutcomeMatches = checkOutcome
           && String(checkOutcome.email || "").toLowerCase() === String(item.email || "").toLowerCase();
         const accountSignals = accountStatusSignals(item, checkOutcomeMatches ? checkOutcome : null);
         const plusMail = plusMailByEmail.get(String(item.email || "").toLowerCase());
-        const mailPromoted = Boolean(plusMail
-          && (accountSignals.account_type === "plus" || accountSignals.detection_status !== "confirmed"));
+        const mailPromoted = shouldPromotePlusMail(plusMail, item, accountSignals);
+        const preserveNonPlanStatus = ACCOUNT_UNAVAILABLE_CODES.has(normalizeCheckCode(accountSignals.status_code))
+          || CREDENTIAL_EXPIRED_CODES.has(normalizeCheckCode(accountSignals.status_code))
+          || CREDENTIAL_REVOKED_CODES.has(normalizeCheckCode(accountSignals.status_code));
         const effectiveSignals = mailPromoted ? {
           ...accountSignals,
           account_type: "plus",
-          account_type_raw: accountSignals.account_type === "plus"
-            ? accountSignals.account_type_raw : "chatgptplusplan",
+          account_type_raw: "chatgptplusplan",
           account_type_known: true,
-          account_type_source: accountSignals.account_type === "plus"
-            ? accountSignals.account_type_source : "mail_confirmation",
+          account_type_source: "mail_confirmation",
           subscription_status: "active",
           detection_status: "confirmed",
-          status_code: "subscription_active",
-          status_reason: "检测到 ChatGPT Plus 开通确认邮件",
-          status_retryable: false,
-          status_evidence_path: "mail_messages.subject+body",
+          status_code: preserveNonPlanStatus ? accountSignals.status_code : "subscription_active",
+          status_reason: preserveNonPlanStatus
+            ? accountSignals.status_reason : "检测到与当前 workspace 匹配的 ChatGPT Plus 开通确认邮件",
+          status_retryable: preserveNonPlanStatus ? accountSignals.status_retryable : false,
+          status_evidence_path: preserveNonPlanStatus
+            ? accountSignals.status_evidence_path : "mail_messages.account_manage_link+subject+body",
           status_checked_at: plusMail.received_at,
           status_confirmed_at: plusMail.received_at,
-          status_source: "mail/plus-confirmation",
+          status_source: preserveNonPlanStatus
+            ? accountSignals.status_source : "mail/plus-confirmation",
           plan_state: "subscribed",
           plan_name: "chatgptplusplan",
           display_status: "subscribed",
         } : accountSignals;
+        const plusAt = (effectiveSignals.account_type === "plus" || mailPromoted)
+          ? plusDateFromAccount(item, plusMailMatchesAccount(plusMail, item) ? plusMail : null)
+          : "";
         const checkState = mailPromoted ? "checked" : checkOutcomeMatches
           ? (checkOutcome.detection_status === "confirmed" ? "checked" : "failed")
           : "";
@@ -2593,6 +2921,14 @@ export class RegistrationService {
           ? checkOutcome.reason : "";
         const metadataMatches = metadata
           && String(metadata.email || "").toLowerCase() === String(item.email || "").toLowerCase();
+        const checkoutMatches = checkoutCheck
+          && String(checkoutCheck.email || "").toLowerCase() === String(item.email || "").toLowerCase();
+        const trialMatches = trialCheck
+          && String(trialCheck.email || "").toLowerCase() === String(item.email || "").toLowerCase()
+          && String(trialCheck.evidence || "") === JP_ZERO_TRIAL_EVIDENCE;
+        const momoMatches = momoCheck
+          && String(momoCheck.email || "").toLowerCase() === String(item.email || "").toLowerCase()
+          && MOMO_CHECK_EVIDENCES.includes(String(momoCheck.evidence || ""));
         const nfapiMatches = nfapiLink
           && String(nfapiLink.email || "").toLowerCase() === String(item.email || "").toLowerCase();
         const storedGroupName = metadataMatches ? String(metadata.group_name || "") : "";
@@ -2608,7 +2944,9 @@ export class RegistrationService {
           ...effectiveSignals,
           mail_plus_confirmed: Boolean(plusMail),
           mail_plus_confirmed_at: plusMail?.received_at || "",
+          plus_at: plusAt,
           mail_plus_subject: plusMail?.subject || "",
+          mail_plus_account_id: plusMail?.account_id || "",
           status_check_state: checkState,
           status_check_error: checkError,
           status_check_attempted_at: checkOutcomeMatches ? checkOutcome.attempted_at : "",
@@ -2624,6 +2962,23 @@ export class RegistrationService {
           custom_group_name: customGroupName,
           default_group_name: defaultGroupName,
           group_source: customGroupName ? "custom" : "plan",
+          checkout_status: checkoutMatches ? String(checkoutCheck.status || "unchecked") : "unchecked",
+          checkout_type: checkoutMatches ? String(checkoutCheck.checkout_type || "") : "",
+          checkout_error: checkoutMatches ? String(checkoutCheck.error || "") : "",
+          checkout_checked_at: checkoutMatches ? String(checkoutCheck.checked_at || "") : "",
+          trial_status: trialMatches ? String(trialCheck.status || "unchecked") : "unchecked",
+          trial_eligible: trialMatches && trialCheck.eligible !== null
+            ? Boolean(trialCheck.eligible) : null,
+          trial_evidence: trialMatches ? String(trialCheck.evidence || "") : "",
+          trial_error: trialMatches ? String(trialCheck.error || "") : "",
+          trial_checked_at: trialMatches ? String(trialCheck.checked_at || "") : "",
+          momo_status: momoMatches ? String(momoCheck.status || "unchecked") : "unchecked",
+          momo_eligible: momoMatches && momoCheck.eligible !== null
+            ? Boolean(momoCheck.eligible) : null,
+          momo_methods: momoMatches ? parseJson(momoCheck.methods, []) : [],
+          momo_evidence: momoMatches ? String(momoCheck.evidence || "") : "",
+          momo_error: momoMatches ? String(momoCheck.error || "") : "",
+          momo_checked_at: momoMatches ? String(momoCheck.checked_at || "") : "",
           nfapi: nfapiMatches ? {
             linked: nfapiLink.status === "imported",
             base_url: nfapiLink.nfapi_base_url,
@@ -2723,6 +3078,14 @@ export class RegistrationService {
           UPDATE registered_account_status_checks SET external_account_id = ?, updated_at = ?
           WHERE external_account_id = ? AND email = ? COLLATE NOCASE
         `);
+        const migrateCheckout = this.db.prepare(`
+          UPDATE registered_account_checkout_checks SET external_account_id = ?, updated_at = ?
+          WHERE external_account_id = ? AND email = ? COLLATE NOCASE
+        `);
+        const migrateTrial = this.db.prepare(`
+          UPDATE registered_account_trial_checks SET external_account_id = ?, updated_at = ?
+          WHERE external_account_id = ? AND email = ? COLLATE NOCASE
+        `);
         const migrateNfapi = this.db.prepare(`
           UPDATE registered_account_nfapi_links SET external_account_id = ?, updated_at = ?
           WHERE external_account_id = ? AND email = ? COLLATE NOCASE
@@ -2739,6 +3102,8 @@ export class RegistrationService {
           if (previousId) {
             migrateMetadata.run(String(item.id), updatedAt, previousId, item.email);
             migrateStatus.run(String(item.id), updatedAt, previousId, item.email);
+            migrateCheckout.run(String(item.id), updatedAt, previousId, item.email);
+            migrateTrial.run(String(item.id), updatedAt, previousId, item.email);
             migrateNfapi.run(String(item.id), updatedAt, previousId, item.email);
             migratePasswordTasks.run(item.id, updatedAt, Number(previousId));
           }
@@ -2790,7 +3155,9 @@ export class RegistrationService {
       selected = before.items.filter((item) => ids.includes(Number(item.id)));
     }
     const emailById = new Map(selected.map((item) => [Number(item.id), String(item.email || "")]));
-    if (!skipNfapiSync) await this.syncLatestNfapiCredentials(selected);
+    const nfapiSync = skipNfapiSync
+      ? { attempted: 0, synced: 0, failed: 0, items: [] }
+      : await this.syncLatestNfapiCredentials(selected);
     const placeholders = ids.map(() => "?").join(",");
     const jobs = this.db.prepare(`
       SELECT external_account_id, email, proxy_label, proxy_ref
@@ -2835,6 +3202,7 @@ export class RegistrationService {
       return outcome;
     });
 
+    await this.scanRegisteredAccountMailEvidence(selected);
     const accounts = await this.listRegisteredAccounts({ refreshUnchecked: false });
     const selectedAfter = accounts.items.filter((item) => ids.includes(Number(item.id)));
     const accountById = new Map(selectedAfter.map((item) => [Number(item.id), item]));
@@ -2842,6 +3210,12 @@ export class RegistrationService {
       const account = accountById.get(Number(outcome.id)) || {};
       const credentialTerminal = CREDENTIAL_EXPIRED_CODES.has(outcome.code)
         || CREDENTIAL_REVOKED_CODES.has(outcome.code);
+      const mailPlanOverride = account.mail_plus_confirmed === true
+        && account.account_type === "plus"
+        && outcome.account_type !== "plus";
+      const mailAccountInvalid = account.availability === "unavailable"
+        && normalizeCheckCode(account.status_code) === "account_deleted"
+        && String(account.status_source || "").toLowerCase() === "mail/account-deletion";
       const merged = {
         ...outcome,
         account_status: outcome.account_status !== "unknown" || credentialTerminal
@@ -2857,6 +3231,32 @@ export class RegistrationService {
         availability: String(account.availability || "unchecked"),
         available: typeof account.available === "boolean" ? account.available : null,
       };
+      if (mailPlanOverride) {
+        merged.subscription_status = "active";
+        merged.account_type = "plus";
+        merged.account_type_raw = String(account.account_type_raw || "chatgptplusplan");
+        merged.type_observed = true;
+        merged.detection_status = "confirmed";
+        merged.code = String(account.status_code || "subscription_active");
+        merged.reason = String(account.status_reason || "检测到与当前 workspace 匹配的 ChatGPT Plus 开通确认邮件");
+        merged.retryable = Boolean(account.status_retryable);
+        merged.source = "mail/plus-confirmation";
+        merged.evidence_path = "mail_messages.account_manage_link+subject+body";
+        merged.checked_at = String(account.mail_plus_confirmed_at || outcome.checked_at);
+      }
+      if (mailAccountInvalid) {
+        merged.checked = true;
+        merged.detection_status = "confirmed";
+        merged.account_status = "deleted";
+        merged.credential_status = "revoked";
+        merged.code = "account_deleted";
+        merged.reason = String(account.status_reason || "对应邮箱收到 OpenAI 账号删除通知，判定账户被封禁");
+        merged.retryable = false;
+        merged.source = "mail/account-deletion";
+        merged.evidence_path = "mail_messages.sender+subject+preview+body";
+        merged.checked_at = String(account.status_checked_at || outcome.checked_at);
+        merged.error = "";
+      }
       merged.type = merged.account_type;
       merged.type_raw = merged.account_type_raw;
       merged.status = merged.account_status;
@@ -2889,6 +3289,11 @@ export class RegistrationService {
       unavailable: selectedAfter.filter((item) => item.availability === "unavailable").length,
       unchecked: selectedAfter.filter((item) => item.availability === "unchecked").length,
       types: typeCounts,
+      nfapi_sync: {
+        attempted: Math.max(0, Number(nfapiSync?.attempted) || 0),
+        synced: Math.max(0, Number(nfapiSync?.synced) || 0),
+        failed: Math.max(0, Number(nfapiSync?.failed) || 0),
+      },
       items: publicResults,
       accounts,
     };
@@ -2914,17 +3319,12 @@ export class RegistrationService {
       ORDER BY created_at DESC LIMIT 1
     `).get(String(accountId));
     if (!job) throw Object.assign(new Error("注册账号不存在"), { status: 404 });
-    const account = await this.client.getAccount(accountId);
-    if (!account) throw Object.assign(new Error("账号已从本地账号池删除"), { status: 404 });
-    if (String(account.platform || "chatgpt").toLowerCase() !== "chatgpt"
-      || String(account.email || "").toLowerCase() !== String(job.email || "").toLowerCase()) {
-      throw Object.assign(new Error("注册账号与任务记录不匹配"), { status: 409 });
-    }
+    const email = String(job.email || "").trim().toLowerCase();
 
     const existing = this.db.prepare(`
       SELECT * FROM registered_account_metadata
       WHERE external_account_id = ? AND email = ? COLLATE NOCASE
-    `).get(String(accountId), account.email);
+    `).get(String(accountId), email);
     const nextCustomName = customName === undefined ? String(existing?.custom_name || "") : customName;
     const nextGroupName = groupName === undefined ? String(existing?.group_name || "") : groupName;
     if (!nextCustomName && !nextGroupName) {
@@ -2941,12 +3341,12 @@ export class RegistrationService {
           custom_name = excluded.custom_name,
           group_name = excluded.group_name,
           updated_at = excluded.updated_at
-      `).run(String(accountId), account.email, nextCustomName, nextGroupName, now, now);
+      `).run(String(accountId), email, nextCustomName, nextGroupName, now, now);
     }
     return {
       item: {
         id: accountId,
-        email: account.email,
+        email,
         custom_name: nextCustomName,
         group_name: nextGroupName,
       },
@@ -2979,16 +3379,10 @@ export class RegistrationService {
       throw Object.assign(new Error("选择中包含不属于本注册页面的账号"), { status: 409 });
     }
 
-    const accounts = await Promise.all(ids.map(async (id) => {
-      const account = await this.client.getAccount(id);
+    const accounts = ids.map((id) => {
       const job = jobByAccountId.get(String(id));
-      if (!account) throw Object.assign(new Error(`账号 #${id} 已从本地账号池删除`), { status: 404 });
-      if (String(account.platform || "chatgpt").toLowerCase() !== "chatgpt"
-        || String(account.email || "").toLowerCase() !== String(job.email || "").toLowerCase()) {
-        throw Object.assign(new Error(`账号 #${id} 与注册记录不匹配`), { status: 409 });
-      }
-      return { id, email: account.email };
-    }));
+      return { id, email: String(job.email || "").trim().toLowerCase() };
+    });
 
     const existingByAccountId = new Map(this.db.prepare(`
       SELECT * FROM registered_account_metadata
@@ -3032,6 +3426,606 @@ export class RegistrationService {
       ids,
       group_name: groupName,
       items: accounts.map((account) => ({ ...account, group_name: groupName })),
+    };
+  }
+
+  persistRegisteredAccountCheckoutCheck({ id, email, checkoutType = "", status, error = "", checkedAt }) {
+    const accountId = String(id || "");
+    const normalizedEmail = safeRemoteText(email, 320).toLowerCase();
+    const normalizedType = new Set(["cs_live", "oaics"]).has(checkoutType) ? checkoutType : "";
+    const normalizedStatus = status === "completed" && normalizedType ? "completed" : "failed";
+    const now = nowIso();
+    this.db.prepare(`
+      INSERT INTO registered_account_checkout_checks
+        (external_account_id, email, checkout_type, status, error, checked_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(external_account_id) DO UPDATE SET
+        email = excluded.email,
+        checkout_type = excluded.checkout_type,
+        status = excluded.status,
+        error = excluded.error,
+        checked_at = excluded.checked_at,
+        updated_at = excluded.updated_at
+    `).run(
+      accountId,
+      normalizedEmail,
+      normalizedType,
+      normalizedStatus,
+      normalizedStatus === "failed" ? checkoutCheckError(error) : "",
+      checkedAt || now,
+      now,
+      now,
+    );
+    return {
+      id: Number(accountId),
+      checkout_status: normalizedStatus,
+      checkout_type: normalizedType,
+      checkout_error: normalizedStatus === "failed" ? checkoutCheckError(error) : "",
+      checkout_checked_at: checkedAt || now,
+    };
+  }
+
+  async resolveGermanCheckoutProxy() {
+    if (typeof this.checkoutProxyResolver === "function") {
+      const resolved = String(await this.checkoutProxyResolver() || "").trim();
+      if (!resolved) throw Object.assign(new Error("未配置 DE Checkout 代理"), { status: 409 });
+      return resolved;
+    }
+    if (this.checkoutProxyCache.proxy && this.checkoutProxyCache.expiresAt > Date.now()) {
+      return this.checkoutProxyCache.proxy;
+    }
+    if (typeof this.client.inspectProxy !== "function") {
+      throw Object.assign(new Error("DE Checkout 代理检测服务不可用"), { status: 503 });
+    }
+    const proxies = this.getProxyPool();
+    if (!proxies.length) {
+      throw Object.assign(new Error("代理池为空，请先添加 DE 代理"), { status: 409 });
+    }
+    const usedSessions = new Set();
+    for (const source of proxies) {
+      const proxy = materializeProxySession(source, usedSessions);
+      try {
+        const inspection = await this.client.inspectProxy({ url: proxy, samples: 1, delay_ms: 0 });
+        const sample = Array.isArray(inspection?.samples) ? inspection.samples[0] : null;
+        if (String(sample?.country_code || "").toUpperCase() !== "DE") continue;
+        this.checkoutProxyCache = { proxy, expiresAt: Date.now() + 5 * 60 * 1000 };
+        return proxy;
+      } catch {
+        // Continue until a saved proxy is positively identified as a DE exit.
+      }
+    }
+    throw Object.assign(new Error("代理池中没有检测到 DE 出口，请先添加德国代理"), { status: 409 });
+  }
+
+  checkRegisteredAccountCheckout(account, proxy) {
+    const accountId = Number(account.id);
+    const existing = this.accountCheckoutChecks.get(accountId);
+    if (existing) return existing;
+    const promise = this.runRegisteredAccountCheckoutCheck(account, proxy)
+      .then((checkoutType) => this.persistRegisteredAccountCheckoutCheck({
+        id: accountId,
+        email: account.email,
+        checkoutType,
+        status: "completed",
+        checkedAt: nowIso(),
+      }))
+      .catch((error) => {
+        if (Number(error?.status) === 429) {
+          if (error?.code === "checkout_creation_rate_limited") {
+            this.accountCheckoutCooldowns.set(accountId, Date.now() + CHECKOUT_ACCOUNT_COOLDOWN_MS);
+          }
+          throw error;
+        }
+        if (Number(error?.status) === 504) {
+          throw Object.assign(error, { status: 408 });
+        }
+        return this.persistRegisteredAccountCheckoutCheck({
+          id: accountId,
+          email: account.email,
+          status: "failed",
+          error,
+          checkedAt: nowIso(),
+        });
+      })
+      .finally(() => this.accountCheckoutChecks.delete(accountId));
+    this.accountCheckoutChecks.set(accountId, promise);
+    return promise;
+  }
+
+  async runRegisteredAccountCheckoutCheck(account, proxy) {
+    const remote = await this.client.getAccount(account.id);
+    if (!remote
+      || String(remote.platform || "chatgpt").toLowerCase() !== "chatgpt"
+      || String(remote.email || "").toLowerCase() !== String(account.email || "").toLowerCase()) {
+      throw Object.assign(new Error("注册账号与远端账号不匹配"), { status: 409 });
+    }
+    const existingCheckoutType = checkoutTypeFromAccount(remote);
+    if (existingCheckoutType) {
+      this.accountCheckoutCooldowns.delete(Number(account.id));
+      return existingCheckoutType;
+    }
+    const cooldownUntil = Number(this.accountCheckoutCooldowns.get(Number(account.id)) || 0);
+    if (cooldownUntil > Date.now()) {
+      throw Object.assign(new Error("Checkout 创建限流冷却中，请稍后重试"), {
+        status: 429,
+        code: "checkout_creation_rate_limited",
+        retryAt: new Date(cooldownUntil).toISOString(),
+      });
+    }
+    this.accountCheckoutCooldowns.delete(Number(account.id));
+    const accessToken = accessTokenFromAccount(remote);
+    if (!accessToken) throw Object.assign(new Error("这个账号尚未获取到 AT"), { status: 409 });
+    return this.checkoutProbe({ accessToken, proxy });
+  }
+
+  async checkRegisteredAccountCheckouts(input = {}) {
+    const ids = normalizeAccountCheckIds(input, 100);
+    const before = await this.listRegisteredAccounts({ refreshUnchecked: false });
+    const accountById = new Map(before.items.map((item) => [Number(item.id), item]));
+    if (ids.some((id) => !accountById.has(id))) {
+      throw Object.assign(new Error("选择中包含不属于本注册页面的账号"), { status: 409 });
+    }
+
+    const proxy = await this.resolveGermanCheckoutProxy();
+    const selected = ids.map((id) => accountById.get(id));
+    const items = new Array(selected.length);
+    let cursor = 1;
+    let globalRateLimited = false;
+    const checkOne = async (index) => {
+      try {
+        items[index] = await this.checkRegisteredAccountCheckout(selected[index], proxy);
+      } catch (error) {
+        if (Number(error?.status) !== 429) throw error;
+        if (error?.code !== "checkout_creation_rate_limited") globalRateLimited = true;
+        items[index] = {
+          id: Number(selected[index].id),
+          checkout_status: "rate_limited",
+          checkout_type: "",
+          checkout_error: "Checkout 检测触发 HTTP 429 限流，请稍后重试",
+          checkout_checked_at: "",
+          checkout_retry_at: error?.retryAt || new Date(Date.now() + CHECKOUT_ACCOUNT_COOLDOWN_MS).toISOString(),
+        };
+      }
+    };
+
+    // A single preflight prevents a rate-limited exit from failing an entire selected page.
+    await checkOne(0);
+    if (!globalRateLimited && selected.length > 1) {
+      const workers = Array.from(
+        { length: Math.min(CHECKOUT_CHECK_CONCURRENCY, selected.length - 1) },
+        async () => {
+          while (!globalRateLimited && cursor < selected.length) {
+            const index = cursor;
+            cursor += 1;
+            await checkOne(index);
+          }
+        },
+      );
+      await Promise.all(workers);
+    }
+    for (let index = 0; index < items.length; index += 1) {
+      if (items[index]) continue;
+      items[index] = {
+        id: Number(selected[index].id),
+        checkout_status: "skipped",
+        checkout_type: "",
+        checkout_error: "本批次触发限流，未继续检测",
+        checkout_checked_at: "",
+      };
+    }
+    const types = items.reduce((summary, item) => {
+      if (item.checkout_type) summary[item.checkout_type] = (summary[item.checkout_type] || 0) + 1;
+      return summary;
+    }, {});
+    return {
+      requested: ids.length,
+      checked: items.filter((item) => item.checkout_status === "completed").length,
+      failed: items.filter((item) => item.checkout_status === "failed").length,
+      rate_limited: items.filter((item) => item.checkout_status === "rate_limited").length,
+      skipped: items.filter((item) => item.checkout_status === "skipped").length,
+      types,
+      items,
+      accounts: await this.listRegisteredAccounts({ refreshUnchecked: false }),
+    };
+  }
+
+  persistRegisteredAccountTrialCheck({ id, email, eligible = null, evidence = "", status, error = "", checkedAt }) {
+    const accountId = String(id || "");
+    const normalizedEmail = safeRemoteText(email, 320).toLowerCase();
+    const normalizedEligible = typeof eligible === "boolean" ? eligible : null;
+    const normalizedStatus = status === "eligible" && normalizedEligible === true
+      ? "eligible"
+      : status === "ineligible" && normalizedEligible === false
+        ? "ineligible"
+        : "failed";
+    const normalizedEvidence = normalizedStatus === "failed" ? "" : safeRemoteText(evidence, 120);
+    const normalizedError = normalizedStatus === "failed" ? trialCheckError(error) : "";
+    const now = nowIso();
+    const effectiveCheckedAt = checkedAt || now;
+    this.db.prepare(`
+      INSERT INTO registered_account_trial_checks
+        (external_account_id, email, status, eligible, evidence, error, checked_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(external_account_id) DO UPDATE SET
+        email = excluded.email,
+        status = excluded.status,
+        eligible = excluded.eligible,
+        evidence = excluded.evidence,
+        error = excluded.error,
+        checked_at = excluded.checked_at,
+        updated_at = excluded.updated_at
+    `).run(
+      accountId,
+      normalizedEmail,
+      normalizedStatus,
+      normalizedEligible === null ? null : Number(normalizedEligible),
+      normalizedEvidence,
+      normalizedError,
+      effectiveCheckedAt,
+      now,
+      now,
+    );
+    return {
+      id: Number(accountId),
+      trial_status: normalizedStatus,
+      trial_eligible: normalizedEligible,
+      trial_evidence: normalizedEvidence,
+      trial_error: normalizedError,
+      trial_checked_at: effectiveCheckedAt,
+    };
+  }
+
+  async resolveJapaneseTrialProxy() {
+    if (typeof this.trialProxyResolver === "function") {
+      const resolved = String(await this.trialProxyResolver() || "").trim();
+      if (!resolved) throw Object.assign(new Error("未配置 JP 资格检测代理"), { status: 409 });
+      return resolved;
+    }
+    if (this.trialProxyCache.proxy && this.trialProxyCache.expiresAt > Date.now()) {
+      return this.trialProxyCache.proxy;
+    }
+    if (typeof this.client.inspectProxy !== "function") {
+      throw Object.assign(new Error("JP 资格检测代理服务不可用"), { status: 503 });
+    }
+    const proxies = this.getProxyPool();
+    if (!proxies.length) {
+      throw Object.assign(new Error("代理池为空，请先添加日本代理"), { status: 409 });
+    }
+    const usedSessions = new Set();
+    for (const source of proxies) {
+      const proxy = materializeProxySession(source, usedSessions);
+      try {
+        const inspection = await this.client.inspectProxy({ url: proxy, samples: 1, delay_ms: 0 });
+        const sample = Array.isArray(inspection?.samples) ? inspection.samples[0] : null;
+        if (String(sample?.country_code || "").toUpperCase() !== "JP") continue;
+        this.trialProxyCache = { proxy, expiresAt: Date.now() + 5 * 60 * 1000 };
+        return proxy;
+      } catch {
+        // Continue until a saved proxy is positively identified as a JP exit.
+      }
+    }
+    throw Object.assign(new Error("代理池中没有检测到 JP 出口，请先添加日本代理"), { status: 409 });
+  }
+
+  checkRegisteredAccountTrial(account, proxy) {
+    const accountId = Number(account.id);
+    const existing = this.accountTrialChecks.get(accountId);
+    if (existing) return existing;
+    const promise = this.runRegisteredAccountTrialCheck(account, proxy)
+      .then((result) => this.persistRegisteredAccountTrialCheck({
+        id: accountId,
+        email: account.email,
+        eligible: result.eligible,
+        evidence: result.evidence,
+        status: result.eligible ? "eligible" : "ineligible",
+        checkedAt: nowIso(),
+      }))
+      .catch((error) => {
+        if (Number(error?.status) === 429) throw error;
+        return this.persistRegisteredAccountTrialCheck({
+          id: accountId,
+          email: account.email,
+          status: "failed",
+          error,
+          checkedAt: nowIso(),
+        });
+      })
+      .finally(() => this.accountTrialChecks.delete(accountId));
+    this.accountTrialChecks.set(accountId, promise);
+    return promise;
+  }
+
+  async runRegisteredAccountTrialCheck(account, proxy) {
+    const remote = await this.client.getAccount(account.id);
+    if (!remote
+      || String(remote.platform || "chatgpt").toLowerCase() !== "chatgpt"
+      || String(remote.email || "").toLowerCase() !== String(account.email || "").toLowerCase()) {
+      throw Object.assign(new Error("注册账号与远端账号不匹配"), { status: 409 });
+    }
+    const accessToken = accessTokenFromAccount(remote);
+    if (!accessToken) throw Object.assign(new Error("这个账号尚未获取到 AT"), { status: 409 });
+    const result = await this.trialProbe({ accessToken, proxy });
+    if (!result || typeof result !== "object" || typeof result.eligible !== "boolean"
+      || !Number.isFinite(result.amountDue) || result.eligible !== (result.amountDue === 0)
+      || String(result.currency || "") !== "JPY"
+      || String(result.evidence || "") !== JP_ZERO_TRIAL_EVIDENCE) {
+      throw Object.assign(new Error("日本 0 元 Checkout 探针返回了无效结果"), { status: 502 });
+    }
+    return {
+      eligible: result.eligible,
+      evidence: safeRemoteText(result.evidence, 120),
+    };
+  }
+
+  async checkRegisteredAccountTrials(input = {}) {
+    const ids = normalizeAccountCheckIds(input, 100);
+    const before = await this.listRegisteredAccounts({ refreshUnchecked: false });
+    const accountById = new Map(before.items.map((item) => [Number(item.id), item]));
+    if (ids.some((id) => !accountById.has(id))) {
+      throw Object.assign(new Error("选择中包含不属于本注册页面的账号"), { status: 409 });
+    }
+
+    const proxy = await this.resolveJapaneseTrialProxy();
+    const selected = ids.map((id) => accountById.get(id));
+    const items = new Array(selected.length);
+    let cursor = 1;
+    let rateLimited = false;
+    const checkOne = async (index) => {
+      try {
+        items[index] = await this.checkRegisteredAccountTrial(selected[index], proxy);
+      } catch (error) {
+        if (Number(error?.status) !== 429) throw error;
+        rateLimited = true;
+        items[index] = {
+          id: Number(selected[index].id),
+          trial_status: "rate_limited",
+          trial_eligible: null,
+          trial_evidence: "",
+          trial_error: "日本 0 元 Checkout 检测触发 HTTP 429 限流，请稍后重试",
+          trial_checked_at: "",
+        };
+      }
+    };
+
+    await checkOne(0);
+    if (!rateLimited && selected.length > 1) {
+      const workers = Array.from(
+        { length: Math.min(TRIAL_CHECK_CONCURRENCY, selected.length - 1) },
+        async () => {
+          while (!rateLimited && cursor < selected.length) {
+            const index = cursor;
+            cursor += 1;
+            await checkOne(index);
+          }
+        },
+      );
+      await Promise.all(workers);
+    }
+    for (let index = 0; index < items.length; index += 1) {
+      if (items[index]) continue;
+      items[index] = {
+        id: Number(selected[index].id),
+        trial_status: "skipped",
+        trial_eligible: null,
+        trial_evidence: "",
+        trial_error: "本批次触发限流，未继续检测",
+        trial_checked_at: "",
+      };
+    }
+    return {
+      requested: ids.length,
+      checked: items.filter((item) => new Set(["eligible", "ineligible"]).has(item.trial_status)).length,
+      eligible: items.filter((item) => item.trial_status === "eligible").length,
+      ineligible: items.filter((item) => item.trial_status === "ineligible").length,
+      failed: items.filter((item) => item.trial_status === "failed").length,
+      rate_limited: items.filter((item) => item.trial_status === "rate_limited").length,
+      skipped: items.filter((item) => item.trial_status === "skipped").length,
+      items,
+      accounts: await this.listRegisteredAccounts({ refreshUnchecked: false }),
+    };
+  }
+
+  persistRegisteredAccountMomoCheck({ id, email, eligible = null, methods = [], evidence = "", status, error = "", checkedAt }) {
+    const accountId = String(id || "");
+    const normalizedEmail = safeRemoteText(email, 320).toLowerCase();
+    const normalizedEligible = typeof eligible === "boolean" ? eligible : null;
+    const normalizedStatus = status === "eligible" && normalizedEligible === true
+      ? "eligible"
+      : status === "ineligible" && normalizedEligible === false
+        ? "ineligible"
+        : "failed";
+    const normalizedMethods = [...new Set((Array.isArray(methods) ? methods : [])
+      .map((method) => String(method || "").trim().toLowerCase())
+      .filter((method) => /^[a-z0-9_]{1,80}$/.test(method)))];
+    const normalizedEvidence = normalizedStatus === "failed" ? "" : safeRemoteText(evidence, 120);
+    const normalizedError = normalizedStatus === "failed" ? momoCheckError(error) : "";
+    const now = nowIso();
+    const effectiveCheckedAt = checkedAt || now;
+    this.db.prepare(`
+      INSERT INTO registered_account_momo_checks
+        (external_account_id, email, status, eligible, methods, evidence, error, checked_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(external_account_id) DO UPDATE SET
+        email = excluded.email,
+        status = excluded.status,
+        eligible = excluded.eligible,
+        methods = excluded.methods,
+        evidence = excluded.evidence,
+        error = excluded.error,
+        checked_at = excluded.checked_at,
+        updated_at = excluded.updated_at
+    `).run(
+      accountId,
+      normalizedEmail,
+      normalizedStatus,
+      normalizedEligible === null ? null : Number(normalizedEligible),
+      JSON.stringify(normalizedMethods),
+      normalizedEvidence,
+      normalizedError,
+      effectiveCheckedAt,
+      now,
+      now,
+    );
+    return {
+      id: Number(accountId),
+      momo_status: normalizedStatus,
+      momo_eligible: normalizedEligible,
+      momo_methods: normalizedMethods,
+      momo_evidence: normalizedEvidence,
+      momo_error: normalizedError,
+      momo_checked_at: effectiveCheckedAt,
+    };
+  }
+
+  async resolveVietnameseMomoProxy() {
+    if (typeof this.momoProxyResolver === "function") {
+      const resolved = String(await this.momoProxyResolver() || "").trim();
+      if (!resolved) throw Object.assign(new Error("未配置 VN MoMo 检测代理"), { status: 409 });
+      return resolved;
+    }
+    if (this.momoProxyCache.proxy && this.momoProxyCache.expiresAt > Date.now()) {
+      return this.momoProxyCache.proxy;
+    }
+    if (typeof this.client.inspectProxy !== "function") {
+      throw Object.assign(new Error("VN MoMo 检测代理服务不可用"), { status: 503 });
+    }
+    const proxies = this.getProxyPool();
+    if (!proxies.length) {
+      throw Object.assign(new Error("代理池为空，请先添加越南代理"), { status: 409 });
+    }
+    const usedSessions = new Set();
+    for (const source of proxies) {
+      const proxy = materializeProxySession(source, usedSessions);
+      try {
+        const inspection = await this.client.inspectProxy({ url: proxy, samples: 1, delay_ms: 0 });
+        const sample = Array.isArray(inspection?.samples) ? inspection.samples[0] : null;
+        if (String(sample?.country_code || "").toUpperCase() !== "VN") continue;
+        this.momoProxyCache = { proxy, expiresAt: Date.now() + 5 * 60 * 1000 };
+        return proxy;
+      } catch {
+        // Continue until a saved proxy is positively identified as a VN exit.
+      }
+    }
+    throw Object.assign(new Error("代理池中没有检测到 VN 出口，请先添加越南代理"), { status: 409 });
+  }
+
+  checkRegisteredAccountMomo(account, proxy) {
+    const accountId = Number(account.id);
+    const existing = this.accountMomoChecks.get(accountId);
+    if (existing) return existing;
+    const promise = this.runRegisteredAccountMomoCheck(account, proxy)
+      .then((result) => this.persistRegisteredAccountMomoCheck({
+        id: accountId,
+        email: account.email,
+        eligible: result.eligible,
+        methods: result.methods,
+        evidence: result.evidence,
+        status: result.eligible ? "eligible" : "ineligible",
+        checkedAt: nowIso(),
+      }))
+      .catch((error) => {
+        if (Number(error?.status) === 429) throw error;
+        return this.persistRegisteredAccountMomoCheck({
+          id: accountId,
+          email: account.email,
+          status: "failed",
+          error,
+          checkedAt: nowIso(),
+        });
+      })
+      .finally(() => this.accountMomoChecks.delete(accountId));
+    this.accountMomoChecks.set(accountId, promise);
+    return promise;
+  }
+
+  async runRegisteredAccountMomoCheck(account, proxy) {
+    const remote = await this.client.getAccount(account.id);
+    if (!remote
+      || String(remote.platform || "chatgpt").toLowerCase() !== "chatgpt"
+      || String(remote.email || "").toLowerCase() !== String(account.email || "").toLowerCase()) {
+      throw Object.assign(new Error("注册账号与远端账号不匹配"), { status: 409 });
+    }
+    const accessToken = accessTokenFromAccount(remote);
+    if (!accessToken) throw Object.assign(new Error("这个账号尚未获取到 AT"), { status: 409 });
+    const result = await this.momoProbe({ accessToken, proxy });
+    if (!result || typeof result !== "object" || typeof result.eligible !== "boolean"
+      || !Array.isArray(result.methods) || !result.methods.length) {
+      throw Object.assign(new Error("MoMo 资格探针返回了无效结果"), { status: 502 });
+    }
+    return {
+      eligible: result.eligible,
+      methods: result.methods,
+      evidence: safeRemoteText(result.evidence, 120),
+    };
+  }
+
+  async checkRegisteredAccountMomoEligibility(input = {}) {
+    const ids = normalizeAccountCheckIds(input, 100);
+    const before = await this.listRegisteredAccounts({ refreshUnchecked: false });
+    const accountById = new Map(before.items.map((item) => [Number(item.id), item]));
+    if (ids.some((id) => !accountById.has(id))) {
+      throw Object.assign(new Error("选择中包含不属于本注册页面的账号"), { status: 409 });
+    }
+
+    const proxy = await this.resolveVietnameseMomoProxy();
+    const selected = ids.map((id) => accountById.get(id));
+    const items = new Array(selected.length);
+    let cursor = 1;
+    let rateLimited = false;
+    const checkOne = async (index) => {
+      try {
+        items[index] = await this.checkRegisteredAccountMomo(selected[index], proxy);
+      } catch (error) {
+        if (Number(error?.status) !== 429) throw error;
+        rateLimited = true;
+        items[index] = {
+          id: Number(selected[index].id),
+          momo_status: "rate_limited",
+          momo_eligible: null,
+          momo_methods: [],
+          momo_evidence: "",
+          momo_error: "MoMo 资格检测触发 HTTP 429 限流，请稍后重试",
+          momo_checked_at: "",
+        };
+      }
+    };
+
+    await checkOne(0);
+    if (!rateLimited && selected.length > 1) {
+      const workers = Array.from(
+        { length: Math.min(MOMO_CHECK_CONCURRENCY, selected.length - 1) },
+        async () => {
+          while (!rateLimited && cursor < selected.length) {
+            const index = cursor;
+            cursor += 1;
+            await checkOne(index);
+          }
+        },
+      );
+      await Promise.all(workers);
+    }
+    for (let index = 0; index < items.length; index += 1) {
+      if (items[index]) continue;
+      items[index] = {
+        id: Number(selected[index].id),
+        momo_status: "skipped",
+        momo_eligible: null,
+        momo_methods: [],
+        momo_evidence: "",
+        momo_error: "本批次触发限流，未继续检测",
+        momo_checked_at: "",
+      };
+    }
+    return {
+      requested: ids.length,
+      checked: items.filter((item) => new Set(["eligible", "ineligible"]).has(item.momo_status)).length,
+      eligible: items.filter((item) => item.momo_status === "eligible").length,
+      ineligible: items.filter((item) => item.momo_status === "ineligible").length,
+      failed: items.filter((item) => item.momo_status === "failed").length,
+      rate_limited: items.filter((item) => item.momo_status === "rate_limited").length,
+      skipped: items.filter((item) => item.momo_status === "skipped").length,
+      items,
+      accounts: await this.listRegisteredAccounts({ refreshUnchecked: false }),
     };
   }
 
@@ -3174,17 +4168,17 @@ export class RegistrationService {
     return { id: accountId, email: credentials.email, credentials };
   }
 
-  refreshRegisteredAccountAccessToken(id) {
+  refreshRegisteredAccountAccessToken(id, input = {}) {
     const accountId = positiveAccountId(id);
     const existing = this.accountAccessTokenRefreshes.get(accountId);
     if (existing) return existing;
-    const promise = this.runRegisteredAccountAccessTokenRefresh(accountId)
+    const promise = this.runRegisteredAccountAccessTokenRefresh(accountId, input)
       .finally(() => this.accountAccessTokenRefreshes.delete(accountId));
     this.accountAccessTokenRefreshes.set(accountId, promise);
     return promise;
   }
 
-  async runRegisteredAccountAccessTokenRefresh(accountId) {
+  async runRegisteredAccountAccessTokenRefresh(accountId, input = {}) {
     const job = this.db.prepare(`
       SELECT * FROM registration_jobs
       WHERE external_account_id = ? AND status = 'completed'
@@ -3228,7 +4222,7 @@ export class RegistrationService {
       });
     };
 
-    const proxy = this.registeredAccountOriginalProxy(job, "刷新 AT");
+    const proxy = this.registeredAccountRefreshProxy(job, input?.proxy_selection);
     try {
       await this.client.upsertOutlookEmailProviderSetting({
         apiUrl: this.mailboxBaseUrl,
@@ -3351,10 +4345,13 @@ export class RegistrationService {
       const placeholders = deletedIds.map(() => "?").join(",");
       this.db.transaction(() => {
         this.db.prepare(`DELETE FROM registered_account_metadata WHERE external_account_id IN (${placeholders})`).run(...deletedIds);
+        this.db.prepare(`DELETE FROM registered_account_checkout_checks WHERE external_account_id IN (${placeholders})`).run(...deletedIds);
+        this.db.prepare(`DELETE FROM registered_account_trial_checks WHERE external_account_id IN (${placeholders})`).run(...deletedIds);
+        this.db.prepare(`DELETE FROM registered_account_momo_checks WHERE external_account_id IN (${placeholders})`).run(...deletedIds);
         this.db.prepare(`DELETE FROM registered_account_nfapi_links WHERE external_account_id IN (${placeholders})`).run(...deletedIds);
       })();
     }
-    return { requested: ids.length, deleted, failed };
+    return { requested: ids.length, deleted, deleted_ids: deletedIds.map(Number), failed };
   }
 
   externalAccounts({ limit = 100, offset = 0 } = {}) {
@@ -3386,11 +4383,9 @@ export class RegistrationService {
   }
 
   async scanRegisteredAccountMailEvidence(accounts = []) {
-    const candidates = accounts.filter((item) => {
-      const type = normalizeRemoteSignal(item?.account_type, "unknown");
-      return !new Set(["plus", "pro", "team", "business", "enterprise", "edu", "trial"])
-        .has(type);
-    });
+    const candidates = accounts.filter((item) => (
+      Number.isSafeInteger(Number(item?.id)) && String(item?.email || "").trim()
+    ));
     if (!candidates.length) return false;
 
     const ids = candidates.map((item) => Number(item.id));
@@ -3405,7 +4400,6 @@ export class RegistrationService {
       WHERE registration_jobs.external_account_id IN (${placeholders})
         AND registration_jobs.status = 'completed'
         AND source_accounts.status = 'connected'
-        AND source_accounts.provider = 'inbox_link'
       ORDER BY registration_jobs.created_at DESC, registration_jobs.id DESC
     `).all(...ids.map(String));
     const sourceById = new Map();
@@ -3416,8 +4410,39 @@ export class RegistrationService {
     }
 
     const sources = [...sourceById.values()];
-    for (let offset = 0; offset < sources.length; offset += 8) {
-      await Promise.allSettled(sources.slice(offset, offset + 8).map((account) => this.scanAccount(account)));
+    const sourcesToScan = sources.filter((account) => ["icloud", "inbox_link"]
+      .includes(String(account.provider || "").toLowerCase()));
+    for (let offset = 0; offset < sourcesToScan.length; offset += 8) {
+      await Promise.allSettled(sourcesToScan.slice(offset, offset + 8).map((account) => this.scanAccount(account)));
+    }
+    const deletionEvidence = accountDeletionMailEvidenceByEmail(
+      this.db,
+      sources.map((item) => Number(item.id)),
+      [...emailById.values()],
+    );
+    const accountIdByEmail = new Map([...emailById.entries()].map(([id, email]) => [email, id]));
+    for (const [email, message] of deletionEvidence) {
+      const accountId = accountIdByEmail.get(email);
+      if (!accountId) continue;
+      const checkedAt = nowIso();
+      this.persistAccountStatusOutcome({
+        external_account_id: String(accountId),
+        email,
+        detection_status: "confirmed",
+        account_status: "deleted",
+        credential_status: "revoked",
+        subscription_status: "unknown",
+        account_type: "unknown",
+        account_type_raw: "",
+        code: "account_deleted",
+        reason: "对应邮箱收到 OpenAI 账号删除通知，判定账户被封禁",
+        retryable: false,
+        source: "mail/account-deletion",
+        http_status: 0,
+        evidence_path: "mail_messages.sender+subject+preview+body",
+        checked_at: checkedAt,
+        attempted_at: nowIso(),
+      });
     }
     return sources.length > 0;
   }
@@ -3483,10 +4508,17 @@ export class RegistrationService {
     const emails = this.db.prepare(`
       SELECT id, graph_message_id AS message_id, internet_message_id, received_at AS date,
         sender_address AS "from", subject, preview AS body_preview, preview, body,
-        verification_code
+        body_content_type, verification_code
       FROM mail_messages WHERE ${conditions.join(" AND ")}
       ORDER BY received_at DESC LIMIT ?
-    `).all(...params, top).map((item) => ({ ...item, folder: "inbox", text: item.body || item.preview }));
+    `).all(...params, top).map((item) => {
+      const storedContentType = String(item.body_content_type || "text").toLowerCase();
+      const bodyContentType = storedContentType === "html"
+        || /^\s*(?:<!doctype\s+html\b|<html\b|<head\b|<body\b)/i.test(String(item.body || ""))
+        ? "html"
+        : "text";
+      return { ...item, body_content_type: bodyContentType, folder: "inbox", text: item.body || item.preview };
+    });
     return { success: true, emails };
   }
 }

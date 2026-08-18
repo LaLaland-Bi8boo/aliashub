@@ -21,9 +21,11 @@ mkdir -p \
   "$PACKAGE_DIR/release" \
   "$PACKAGE_DIR/data/attachments" \
   "$PACKAGE_DIR/data/registration-worker" \
+  "$PACKAGE_DIR/data/mail-pickup" \
+  "$PACKAGE_DIR/data/payment-link-extractor" \
   "$RELEASE_DIR"
 
-for directory in server src public extension; do
+for directory in server src public extension mail-pickup; do
   cp -a "$directory" "$PACKAGE_DIR/$directory"
 done
 
@@ -69,6 +71,21 @@ tar \
   --exclude='*.pyo' \
   -C registration-worker -cf - . \
   | tar -C "$PACKAGE_DIR/registration-worker" -xf -
+
+[[ -f payment-link-extractor/Dockerfile ]] || {
+  printf 'Bundled payment-link extractor source is missing.\n' >&2
+  exit 1
+}
+mkdir -p "$PACKAGE_DIR/payment-link-extractor"
+tar \
+  --exclude='*/__pycache__' \
+  --exclude='*.pyc' \
+  --exclude='*.pyo' \
+  --exclude='*/.pytest_cache' \
+  -C payment-link-extractor -cf - \
+  Dockerfile .dockerignore .env.example README.md requirements.txt \
+  iprocket_chain_bridge.py payment_link_extractor \
+  | tar -C "$PACKAGE_DIR/payment-link-extractor" -xf -
 
 for file in \
   package.json package-lock.json index.html vite.config.js \
@@ -117,10 +134,13 @@ fi
 find "$PACKAGE_DIR" -type d -exec chmod 755 {} +
 find "$PACKAGE_DIR" -type f -exec chmod 644 {} +
 chmod 755 "$PACKAGE_DIR/scripts/"*.sh
+chmod 755 "$PACKAGE_DIR/mail-pickup/ldxp-verification-browser.sh"
 chmod 700 \
   "$PACKAGE_DIR/data" \
   "$PACKAGE_DIR/data/attachments" \
-  "$PACKAGE_DIR/data/registration-worker"
+  "$PACKAGE_DIR/data/registration-worker" \
+  "$PACKAGE_DIR/data/mail-pickup" \
+  "$PACKAGE_DIR/data/payment-link-extractor"
 
 rm -f "$ARCHIVE_PATH" "$ARCHIVE_PATH.sha256"
 (

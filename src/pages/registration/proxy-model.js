@@ -124,10 +124,12 @@ export function normalizeProxySample(item = {}) {
 
 export function proxyMetadataLabel(metadata = {}) {
   const details = metadata || {};
+  const countryCode = String(details.country_code || "").trim().toUpperCase();
   const mode = String(details.dynamic_mode || "").toLowerCase();
-  if (mode === "sticky_session") return `动态 · ${details.session_ttl || "会话"} 粘性`;
-  if (mode) return "动态出口";
-  return "";
+  const route = mode === "sticky_session"
+    ? `动态 · ${details.session_ttl || "会话"} 粘性`
+    : mode ? "动态出口" : "";
+  return [countryCode, route].filter(Boolean).join(" · ");
 }
 
 export function proxySelectLabel(masked, metadata) {

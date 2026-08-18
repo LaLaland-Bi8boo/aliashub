@@ -1,11 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
+import { timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import "dotenv/config";
 import express from "express";
-import { deleteSplitAddresses, generateSplits, importIcloudAliases, JobRunner, parseJson, publicAccount, syncOfficialAddresses } from "./account-service.js";
+import { deleteSelectedAddresses, deleteSplitAddresses, generateSplits, importIcloudAliases, JobRunner, parseJson, publicAccount, syncOfficialAddresses } from "./account-service.js";
 import { createAuth } from "./auth.js";
-import { isIcloudImportedStrategy, microsoftDomains, normalizeMicrosoftEmail } from "./address-generator.js";
+import { isIcloudImportedStrategy, microsoftDomains, normalizeIcloudAliasEmail, normalizeMicrosoftEmail } from "./address-generator.js";
 import { audit, createDatabase, createSourceAccount, getSettings, nowIso, setSetting } from "./db.js";
 import { ExtensionService } from "./extension-service.js";
 import { registerEzCaptchaAdapter } from "./ez-captcha-adapter.js";
@@ -18,6 +19,8 @@ import { NfapiService, PUBLIC_AGENT_IDENTITY_ERROR_CODES } from "./nfapi-service
 import { NfapiCredentialStore, NfapiCredentialSync } from "./nfapi-credential-sync.js";
 import { MicrosoftRegistrationRunnerService } from "./microsoft-registration-runner-service.js";
 import { MicrosoftRegistrationService } from "./microsoft-registration-service.js";
+import { PickupService } from "./pickup-service.js";
+import { PaymentLinkService } from "./payment-link-service.js";
 import { RegistrationClient } from "./registration-client.js";
 import { RegistrationService } from "./registration-service.js";
 
@@ -70,11 +73,12 @@ function requireMicrosoftAccount(account) {
   return account;
 }
 
-function addressQuery(db, { accountId, kind, q, page = 1, limit = 50 } = {}) {
+function addressQuery(db, { accountId, kind, strategy, q, page = 1, limit = 50 } = {}) {
   const conditions = ["source_accounts.provider <> 'inbox_link'"];
   const params = [];
   if (accountId) { conditions.push("addresses.account_id = ?"); params.push(Number(accountId)); }
   if (kind && kind !== "all") { conditions.push("addresses.kind = ?"); params.push(kind); }
+  if (strategy) { conditions.push("addresses.strategy = ?"); params.push(String(strategy)); }
   if (q) {
     conditions.push("(addresses.address LIKE ? OR addresses.label LIKE ? OR addresses.purpose LIKE ? OR source_accounts.email LIKE ?)");
     const term = `%${q}%`;
@@ -99,7 +103,33 @@ function addressQuery(db, { accountId, kind, q, page = 1, limit = 50 } = {}) {
         )
           AND lower(registration_history.status) = 'failed'
           AND registration_history.failure_reason = 'user_already_exists'
-      ) THEN 1 ELSE 0 END AS registration_occupied
+      ) THEN 1 ELSE 0 END AS registration_occupied,
+      (
+        SELECT COUNT(*)
+        FROM registration_jobs AS failed_registration
+        WHERE (
+          failed_registration.address_id = addresses.id
+          OR (
+            addresses.kind IN ('primary', 'official')
+            AND failed_registration.base_address_id = addresses.id
+            AND failed_registration.email = addresses.address COLLATE NOCASE
+          )
+        )
+          AND lower(failed_registration.status) = 'failed'
+      ) AS registration_failure_count,
+      COALESCE((
+        SELECT lower(latest_registration.status)
+        FROM registration_jobs AS latest_registration
+        WHERE latest_registration.address_id = addresses.id
+          OR (
+            addresses.kind IN ('primary', 'official')
+            AND latest_registration.base_address_id = addresses.id
+            AND latest_registration.email = addresses.address COLLATE NOCASE
+          )
+        ORDER BY COALESCE(latest_registration.finished_at, latest_registration.updated_at, latest_registration.created_at) DESC,
+          latest_registration.id DESC
+        LIMIT 1
+      ), '') AS last_registration_status
     FROM addresses
     JOIN source_accounts ON source_accounts.id = addresses.account_id
     LEFT JOIN addresses parent ON parent.id = addresses.parent_address_id
@@ -107,14 +137,67 @@ function addressQuery(db, { accountId, kind, q, page = 1, limit = 50 } = {}) {
     ORDER BY CASE addresses.kind WHEN 'primary' THEN 0 WHEN 'official' THEN 1 ELSE 2 END, addresses.created_at DESC
     LIMIT ? OFFSET ?
   `).all(...params, limit, (page - 1) * limit)
-    .map((item) => ({ ...item, registration_occupied: Boolean(item.registration_occupied) }));
+    .map((item) => ({
+      ...item,
+      registration_occupied: Boolean(item.registration_occupied),
+      registration_failure_count: Number(item.registration_failure_count) || 0,
+      registration_failed: item.last_registration_status === "failed",
+    }));
   return { items, total, page, pages: Math.max(1, Math.ceil(total / limit)) };
+}
+
+function failedRegistrationAddressIds(db, { accountId, kind, strategy, q } = {}) {
+  const conditions = [
+    "source_accounts.provider <> 'inbox_link'",
+    `(addresses.kind = 'split' OR (
+      source_accounts.provider = 'icloud'
+      AND addresses.kind = 'official'
+      AND addresses.strategy IN ('icloud_mail_alias', 'icloud_hide_my_email', 'icloud_custom_domain')
+    ))`,
+    `COALESCE((
+      SELECT lower(latest_registration.status)
+      FROM registration_jobs AS latest_registration
+      WHERE latest_registration.address_id = addresses.id
+        OR (
+          addresses.kind IN ('primary', 'official')
+          AND latest_registration.base_address_id = addresses.id
+          AND latest_registration.email = addresses.address COLLATE NOCASE
+        )
+      ORDER BY COALESCE(latest_registration.finished_at, latest_registration.updated_at, latest_registration.created_at) DESC,
+        latest_registration.id DESC
+      LIMIT 1
+    ), '') = 'failed'`,
+  ];
+  const params = [];
+  if (accountId) { conditions.push("addresses.account_id = ?"); params.push(Number(accountId)); }
+  if (kind && kind !== "all") { conditions.push("addresses.kind = ?"); params.push(kind); }
+  if (strategy) { conditions.push("addresses.strategy = ?"); params.push(String(strategy)); }
+  if (q) {
+    conditions.push("(addresses.address LIKE ? OR addresses.label LIKE ? OR addresses.purpose LIKE ? OR source_accounts.email LIKE ?)");
+    const term = `%${q}%`;
+    params.push(term, term, term, term);
+  }
+  const ids = db.prepare(`
+    SELECT addresses.id
+    FROM addresses
+    JOIN source_accounts ON source_accounts.id = addresses.account_id
+    WHERE ${conditions.join(" AND ")}
+    ORDER BY addresses.created_at DESC, addresses.id DESC
+    LIMIT 5000
+  `).all(...params).map((item) => Number(item.id));
+  return { ids, count: ids.length };
 }
 
 function publicMessage(row, { includeBody = false } = {}) {
   if (!row) return null;
+  const storedContentType = String(row.body_content_type || "text").toLowerCase();
+  const bodyContentType = storedContentType === "html"
+    || /^\s*(?:<!doctype\s+html\b|<html\b|<head\b|<body\b)/i.test(String(row.body || ""))
+    ? "html"
+    : "text";
   const item = {
     ...row,
+    body_content_type: bodyContentType,
     to_recipients: parseJson(row.to_recipients, []),
     cc_recipients: parseJson(row.cc_recipients, []),
     is_read: Boolean(row.is_read),
@@ -390,6 +473,32 @@ export function createApp(options = {}) {
     browserPassword: process.env.REGISTRATION_BROWSER_PASSWORD,
     icloudLink,
     inboxLinkMailboxes,
+    pickup: options.pickup || null,
+    checkoutProbe: options.checkoutProbe,
+    checkoutProxyResolver: options.checkoutProxyResolver,
+    trialProbe: options.trialProbe,
+    trialProxyResolver: options.trialProxyResolver,
+    momoProbe: options.momoProbe,
+    momoProxyResolver: options.momoProxyResolver,
+  });
+  const pickup = options.pickup || new PickupService({
+    db,
+    registration,
+    baseUrl: options.pickupBaseUrl || process.env.PICKUP_SERVICE_URL,
+    publicUrl: options.pickupPublicUrl || process.env.PICKUP_PUBLIC_URL,
+    username: options.pickupUsername || process.env.PICKUP_ADMIN_USERNAME || process.env.ADMIN_USERNAME,
+    password: options.pickupPassword || process.env.PICKUP_ADMIN_PASSWORD || process.env.ADMIN_PASSWORD,
+    fetchFn: options.pickupFetchFn || options.fetchFn,
+  });
+  registration.pickup = pickup;
+  const paymentLinks = options.paymentLinks || new PaymentLinkService({
+    db,
+    registration,
+    baseUrl: options.paymentLinkBaseUrl ?? process.env.PAYMENT_LINK_SERVICE_URL,
+    password: options.paymentLinkPassword ?? (process.env.PAYMENT_LINK_SERVICE_PASSWORD || process.env.ADMIN_PASSWORD),
+    fetchFn: options.paymentLinkFetchFn || options.fetchFn,
+    pollIntervalMs: options.paymentLinkPollIntervalMs,
+    timeoutMs: options.paymentLinkTimeoutMs,
   });
   const nfapi = options.nfapi || new NfapiService({
     db,
@@ -405,15 +514,8 @@ export function createApp(options = {}) {
   });
   let nfapiCredentialSync = Object.hasOwn(options, "nfapiCredentialSync")
     ? options.nfapiCredentialSync : null;
-  const nfapiCredentialStoreConfigured = Boolean(options.nfapiCredentialStore)
-    || [
-      process.env.NFAPI_CREDENTIAL_DB_HOST,
-      process.env.NFAPI_CREDENTIAL_DB_NAME,
-      process.env.NFAPI_CREDENTIAL_DB_USER,
-    ].every((value) => String(value || "").trim());
   if (!Object.hasOwn(options, "nfapiCredentialSync")
     && !options.registrationClient
-    && nfapiCredentialStoreConfigured
     && typeof nfapi.client === "function") {
     const store = options.nfapiCredentialStore || new NfapiCredentialStore();
     nfapiCredentialSync = new NfapiCredentialSync({
@@ -452,6 +554,9 @@ export function createApp(options = {}) {
     secure: publicBaseUrl.startsWith("https://"),
   });
   const app = express();
+  const icloudPrivacyInternalKey = String(
+    options.icloudPrivacyInternalKey || process.env.ICLOUD_PRIVACY_INTERNAL_KEY || "",
+  ).trim();
 
   db.prepare("UPDATE automation_jobs SET status = 'queued', message = '服务重启后恢复任务', updated_at = ? WHERE status = 'running' AND type = 'inbox_scan'").run(nowIso());
   db.prepare(`
@@ -478,6 +583,73 @@ export function createApp(options = {}) {
   app.get("/api/auth/check", auth.check);
   app.post("/api/auth/login", auth.login);
   app.post("/api/auth/logout", auth.logout);
+
+  const requireIcloudPrivacyInternalKey = (req, res, next) => {
+    const supplied = String(req.get("X-Alias-Hub-Internal-Key") || "");
+    const expected = icloudPrivacyInternalKey;
+    const suppliedBuffer = Buffer.from(supplied);
+    const expectedBuffer = Buffer.from(expected);
+    const valid = suppliedBuffer.length === expectedBuffer.length
+      && expectedBuffer.length > 0
+      && timingSafeEqual(suppliedBuffer, expectedBuffer);
+    if (!valid) return res.status(401).json({ error: "内部接口认证失败" });
+    return next();
+  };
+  app.use("/api/internal/icloud-privacy", requireIcloudPrivacyInternalKey);
+  app.post("/api/internal/icloud-privacy/import", (req, res, next) => {
+    try {
+      const sourceAccountId = Number(req.body?.source_account_id);
+      if (!Number.isSafeInteger(sourceAccountId) || sourceAccountId <= 0) {
+        throw Object.assign(new Error("源头邮箱 ID 无效"), { status: 400 });
+      }
+      const account = db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(sourceAccountId);
+      if (!account) throw Object.assign(new Error("源头邮箱不存在"), { status: 404 });
+      const sourceAppleId = normalizeIcloudAliasEmail(req.body?.source_apple_id);
+      if (sourceAppleId && sourceAppleId !== String(account.email || "").toLowerCase()) {
+        throw Object.assign(new Error("Apple ID 与所选源头邮箱不一致"), { status: 409 });
+      }
+      const emails = Array.isArray(req.body?.emails) ? req.body.emails : [];
+      importIcloudAliases(db, account, emails, {
+        type: "hide_my_email",
+        replace: false,
+        purpose: "Apple 新接口创建",
+        remoteConfirmed: true,
+      });
+      const normalized = [...new Set(emails.map(normalizeIcloudAliasEmail).filter(Boolean))];
+      const items = normalized.length ? db.prepare(`
+        SELECT * FROM addresses
+        WHERE account_id = ? AND strategy = 'icloud_hide_my_email'
+          AND address IN (${normalized.map(() => "?").join(",")})
+        ORDER BY created_at DESC
+      `).all(sourceAccountId, ...normalized) : [];
+      res.json({ imported: items.length, items });
+    } catch (error) { next(error); }
+  });
+  app.delete("/api/internal/icloud-privacy/address", async (req, res, next) => {
+    try {
+      const sourceAccountId = Number(req.body?.source_account_id);
+      const email = normalizeIcloudAliasEmail(req.body?.email);
+      if (!Number.isSafeInteger(sourceAccountId) || sourceAccountId <= 0 || !email) {
+        throw Object.assign(new Error("源头邮箱 ID 或隐藏邮箱无效"), { status: 400 });
+      }
+      const item = db.prepare(`
+        SELECT * FROM addresses
+        WHERE account_id = ? AND address = ? COLLATE NOCASE
+          AND kind = 'official' AND strategy = 'icloud_hide_my_email'
+      `).get(sourceAccountId, email);
+      if (!item) return res.json({ deleted: 0 });
+      if (pickup.registrationProtectionEnabled()) {
+        const inventory = await pickup.listStatuses();
+        const listed = (inventory.items || []).find((entry) => String(entry.email || "").toLowerCase() === email);
+        if (listed && ["ready", "sold"].includes(listed.status)) {
+          throw Object.assign(new Error("这个隐藏邮箱已进入售卖库存，请先从取件站下架"), { status: 409 });
+        }
+      }
+      db.prepare("DELETE FROM addresses WHERE id = ?").run(item.id);
+      audit(db, sourceAccountId, "alias", "删除隐藏邮箱创建记录", email, { apple_remote_deleted: false });
+      return res.json({ deleted: 1 });
+    } catch (error) { return next(error); }
+  });
 
   registerEzCaptchaAdapter({
     app,
@@ -650,6 +822,37 @@ export function createApp(options = {}) {
       res.json({ ...result.items[0], gpt_deleted: result.gpt_deleted, gpt_failed: result.gpt_failed });
     } catch (error) { next(error); }
   });
+  app.get("/api/pickup/config", (_req, res) => {
+    res.json(pickup.configuration());
+  });
+  app.get("/api/pickup/statuses", async (_req, res, next) => {
+    try { res.json(await pickup.listStatuses()); }
+    catch (error) { next(error); }
+  });
+  app.get("/api/pickup/source-addresses", (_req, res, next) => {
+    try { res.json(pickup.listSourceAddresses()); }
+    catch (error) { next(error); }
+  });
+  app.post("/api/pickup/import-addresses", async (req, res, next) => {
+    try { res.json(await pickup.importSourceAddresses(req.body || {})); }
+    catch (error) { next(error); }
+  });
+  app.post("/api/pickup/import-accounts", async (req, res, next) => {
+    try { res.json(await pickup.importRegisteredAccounts(req.body || {})); }
+    catch (error) { next(error); }
+  });
+  app.get("/api/registration/payment-links", (_req, res, next) => {
+    try { res.json(paymentLinks.list()); } catch (error) { next(error); }
+  });
+  app.put("/api/registration/payment-links/proxies", (req, res, next) => {
+    try { res.json(paymentLinks.saveProxyPool(req.body || {})); } catch (error) { next(error); }
+  });
+  app.post("/api/registration/payment-links/proxy-source", async (req, res, next) => {
+    try { res.json(await paymentLinks.refreshProxySource(req.body || {})); } catch (error) { next(error); }
+  });
+  app.post("/api/registration/payment-links/tasks", async (req, res, next) => {
+    try { res.status(202).json(await paymentLinks.start(req.body || {})); } catch (error) { next(error); }
+  });
   app.put("/api/registration/proxies", (req, res, next) => {
     try { res.json(registration.saveProxyPool(req.body?.proxies)); } catch (error) { next(error); }
   });
@@ -660,7 +863,10 @@ export function createApp(options = {}) {
     try { res.status(202).json({ items: await registration.createJobs(req.body || {}) }); } catch (error) { next(error); }
   });
   app.get("/api/registration/jobs", async (req, res, next) => {
-    try { res.json({ items: await registration.listJobs(req.query) }); } catch (error) { next(error); }
+    try {
+      const items = await registration.listJobs(req.query);
+      res.json({ items, counts: registration.jobCounts() });
+    } catch (error) { next(error); }
   });
   app.get("/api/registration/queue/control", async (_req, res, next) => {
     try { res.json(await registration.registrationQueueControl()); } catch (error) { next(error); }
@@ -696,7 +902,7 @@ export function createApp(options = {}) {
     try { res.json({ items: await registration.taskEvents(req.params.id) }); } catch (error) { next(error); }
   });
   app.get("/api/registration/accounts", async (_req, res, next) => {
-    try { res.json(await registration.listRegisteredAccounts()); } catch (error) { next(error); }
+    try { res.json(await registration.listRegisteredAccounts({ refreshUnchecked: false })); } catch (error) { next(error); }
   });
   app.post("/api/registration/accounts/import-local", async (req, res, next) => {
     try { res.status(201).json(await registration.importLocalAccounts(req.body || {})); } catch (error) { next(error); }
@@ -712,6 +918,15 @@ export function createApp(options = {}) {
   app.post("/api/registration/accounts/export-mailbox-links", (req, res, next) => {
     try { res.json(registration.exportRegisteredAccountMailboxLinks(req.body || {})); } catch (error) { next(error); }
   });
+  app.post("/api/registration/accounts/check-checkout", async (req, res, next) => {
+    try { res.json(await registration.checkRegisteredAccountCheckouts(req.body || {})); } catch (error) { next(error); }
+  });
+  app.post("/api/registration/accounts/check-jp-trial", async (req, res, next) => {
+    try { res.json(await registration.checkRegisteredAccountTrials(req.body || {})); } catch (error) { next(error); }
+  });
+  app.post("/api/registration/accounts/check-momo", async (req, res, next) => {
+    try { res.json(await registration.checkRegisteredAccountMomoEligibility(req.body || {})); } catch (error) { next(error); }
+  });
   app.patch("/api/registration/accounts/bulk-group", async (req, res, next) => {
     try { res.json(await registration.updateRegisteredAccountGroups(req.body || {})); } catch (error) { next(error); }
   });
@@ -719,7 +934,7 @@ export function createApp(options = {}) {
     try { res.json(await registration.updateRegisteredAccountMetadata(req.params.id, req.body || {})); } catch (error) { next(error); }
   });
   app.post("/api/registration/accounts/:id/refresh-at", async (req, res, next) => {
-    try { res.json(await registration.refreshRegisteredAccountAccessToken(req.params.id)); } catch (error) { next(error); }
+    try { res.json(await registration.refreshRegisteredAccountAccessToken(req.params.id, req.body || {})); } catch (error) { next(error); }
   });
   app.get("/api/registration/accounts/:id/access-token", async (req, res, next) => {
     try { res.json(await registration.registeredAccountAccessToken(req.params.id)); } catch (error) { next(error); }
@@ -1091,9 +1306,19 @@ export function createApp(options = {}) {
     res.json(addressQuery(db, {
       accountId: req.query.accountId,
       kind: req.query.kind,
+      strategy: req.query.strategy,
       q: req.query.q,
       page: positive(req.query.page, 1, 10_000),
       limit: positive(req.query.limit, 50, 200),
+    }));
+  });
+
+  app.get("/api/addresses/registration-failures", (req, res) => {
+    res.json(failedRegistrationAddressIds(db, {
+      accountId: req.query.accountId,
+      kind: req.query.kind,
+      strategy: req.query.strategy,
+      q: req.query.q,
     }));
   });
 
@@ -1108,21 +1333,60 @@ export function createApp(options = {}) {
     } catch (error) { next(error); }
   });
 
-  app.post("/api/addresses/bulk-delete", (req, res, next) => {
+  app.post("/api/addresses/bulk-delete", async (req, res, next) => {
     try {
-      const accountId = req.body?.accountId && req.body.accountId !== "all" ? Number(req.body.accountId) : null;
-      if (accountId && !db.prepare("SELECT 1 FROM source_accounts WHERE id = ?").get(accountId)) {
+      const accountValue = req.body?.accountId;
+      const accountId = accountValue && accountValue !== "all" ? Number(accountValue) : null;
+      if (accountId !== null && (!Number.isSafeInteger(accountId) || accountId <= 0)) {
+        throw Object.assign(new Error("源头邮箱 ID 无效"), { status: 400 });
+      }
+      if (accountId !== null && !db.prepare("SELECT 1 FROM source_accounts WHERE id = ?").get(accountId)) {
         throw Object.assign(new Error("源头邮箱不存在"), { status: 404 });
       }
-      res.json(deleteSplitAddresses(db, {
-        ids: req.body?.ids,
-        accountId,
-        all: req.body?.mode === "all",
-      }));
+      if (req.body?.mode === "all") {
+        return res.json(deleteSplitAddresses(db, { accountId, all: true }));
+      }
+      const ids = [...new Set((Array.isArray(req.body?.ids) ? req.body.ids : []).map(Number)
+        .filter((id) => Number.isInteger(id) && id > 0))];
+      if (!ids.length) throw Object.assign(new Error("请选择要删除的地址"), { status: 400 });
+      if (ids.length > 5_000) throw Object.assign(new Error("单次最多删除 5000 个地址"), { status: 400 });
+      const params = [...ids];
+      const accountCondition = accountId ? "AND addresses.account_id = ?" : "";
+      if (accountId) params.push(accountId);
+      const items = db.prepare(`
+        SELECT addresses.*, source_accounts.provider AS source_provider
+        FROM addresses
+        JOIN source_accounts ON source_accounts.id = addresses.account_id
+        WHERE addresses.id IN (${ids.map(() => "?").join(",")}) ${accountCondition}
+      `).all(...params);
+      const activeRegistration = db.prepare(`
+        SELECT 1 FROM registration_jobs
+        WHERE (
+          registration_jobs.address_id = ?
+          OR (registration_jobs.base_address_id = ? AND registration_jobs.email = ? COLLATE NOCASE)
+        )
+          AND lower(registration_jobs.status) IN ('queued', 'pending', 'claimed', 'running', 'paused', 'cancel_requested')
+        LIMIT 1
+      `);
+      if (items.some((item) => activeRegistration.get(item.id, item.id, item.address))) {
+        throw Object.assign(new Error("所选地址中有邮箱正在注册，请等待任务结束后再删除"), { status: 409 });
+      }
+      const importedIcloud = items.filter((item) => item.source_provider === "icloud"
+        && item.kind === "official" && isIcloudImportedStrategy(item.strategy));
+      if (importedIcloud.length && pickup.registrationProtectionEnabled()) {
+        const inventory = await pickup.listStatuses();
+        const listed = new Set((inventory.items || [])
+          .filter((item) => ["ready", "sold"].includes(String(item.status || "").toLowerCase()))
+          .map((item) => String(item.email || "").toLowerCase()));
+        if (importedIcloud.some((item) => listed.has(String(item.address || "").toLowerCase()))) {
+          throw Object.assign(new Error("所选邮箱包含取件站售卖库存，请先从取件站下架"), { status: 409 });
+        }
+      }
+      return res.json(deleteSelectedAddresses(db, { ids, accountId }));
     } catch (error) { next(error); }
   });
 
-  app.delete("/api/addresses/:id", (req, res, next) => {
+  app.delete("/api/addresses/:id", async (req, res, next) => {
     try {
       const item = db.prepare(`
         SELECT addresses.*, source_accounts.provider AS source_provider
@@ -1135,6 +1399,13 @@ export function createApp(options = {}) {
         && isIcloudImportedStrategy(item.strategy);
       if (item.kind !== "split" && !importedIcloudAddress) {
         throw Object.assign(new Error("源头号和官方别名需要在对应邮箱官网删除"), { status: 409 });
+      }
+      if (importedIcloudAddress && pickup.registrationProtectionEnabled()) {
+        const inventory = await pickup.listStatuses();
+        const listed = (inventory.items || []).find((entry) => String(entry.email || "").toLowerCase() === String(item.address || "").toLowerCase());
+        if (listed && ["ready", "sold"].includes(listed.status)) {
+          throw Object.assign(new Error("这个邮箱已进入售卖库存，请先从取件站下架"), { status: 409 });
+        }
       }
       db.prepare("DELETE FROM addresses WHERE id = ?").run(item.id);
       audit(
@@ -1530,7 +1801,7 @@ export function createApp(options = {}) {
     if (PUBLIC_AGENT_IDENTITY_ERROR_CODES.has(error?.code)) body.code = error.code;
     res.status(status).json(body);
   });
-  return { app, db, graph, gmail, icloud, icloudLink, inbox, inboxLinkMailboxes, extension, jobs, registration, nfapi, nfapiCredentialSync, microsoftRegistration, microsoftRegistrationRunner };
+  return { app, db, graph, gmail, icloud, icloudLink, inbox, inboxLinkMailboxes, extension, jobs, registration, pickup, paymentLinks, nfapi, nfapiCredentialSync, microsoftRegistration, microsoftRegistrationRunner };
 }
 
 const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);

@@ -158,6 +158,7 @@ test("registered accounts require the same remote id and email and expose normal
   assert.equal(plus.plan_state, "subscribed");
   assert.equal(plus.plan_name, "chatgpt_plus_plan");
   assert.equal(plus.status_checked_at, checkedAt);
+  assert.equal(plus.plus_at, "");
   assert.equal(plus.status_source, "backend-api/me");
   assert.equal(plus.source, "backend-api/me");
   assert.equal(plus.status_check_required, false);
@@ -694,6 +695,123 @@ test("manual status refresh checks only selected registered accounts and preserv
   assert.doesNotMatch(JSON.stringify(result), /proxy-user|proxy-password/);
 });
 
+test("manual selected refresh marks an OpenAI-deleted account as unavailable", async (t) => {
+  const db = testDatabase(t);
+  const id = 77;
+  addCompletedRegistration(db, id, "deleted-selected@example.com");
+  const service = new RegistrationService({
+    db,
+    graph: {},
+    client: {
+      async listAccounts() {
+        return { items: [{
+          id,
+          platform: "chatgpt",
+          email: "deleted-selected@example.com",
+          lifecycle_status: "subscribed",
+          validity_status: "valid",
+          display_status: "subscribed",
+          plan_state: "subscribed",
+          plan_name: "plus",
+          overview: {
+            valid: true,
+            checked_at: "2026-08-01T00:00:00.000Z",
+            check_source: "backend-api/wham/usage",
+          },
+          credentials: [{ key: "access_token", value: "private-deleted-selected-token" }],
+        }] };
+      },
+      async refreshAccountPlans(ids) {
+        assert.deepEqual(ids, [id]);
+        return { items: [{
+          account_id: id,
+          ok: false,
+          valid: null,
+          detection_result: "inconclusive",
+          status_code: "account_deleted",
+          status_reason: "OpenAI 已确认账号已删除或停用，AT 已失效",
+          status_retryable: false,
+          status_source: "backend-api/accounts/check",
+          account_status: "deleted",
+          credential_status: "revoked",
+          account_type: "plus",
+          account_type_raw: "chatgptplusplan",
+        }] };
+      },
+    },
+  });
+
+  const result = await service.refreshRegisteredAccountSignals({ ids: [id] });
+  const account = result.accounts.items.find((item) => item.id === id);
+  assert.equal(result.checked, 1);
+  assert.equal(result.unavailable, 1);
+  assert.equal(result.items[0].code, "account_deleted");
+  assert.equal(account.availability, "unavailable");
+  assert.equal(account.account_status, "deleted");
+  assert.equal(account.status_code, "account_deleted");
+});
+
+test("manual selected refresh continues when NFapi credential sync partially fails", async (t) => {
+  const db = testDatabase(t);
+  const id = 78;
+  const email = "nfapi-sync-missing@example.com";
+  addCompletedRegistration(db, id, email);
+  const account = {
+    id,
+    platform: "chatgpt",
+    email,
+    lifecycle_status: "registered",
+    validity_status: "valid",
+    display_status: "registered",
+    plan_state: "free",
+    plan_name: "free",
+    overview: { password_status: "not_configured" },
+    credentials: [{ key: "access_token", value: "private-nfapi-sync-token" }],
+  };
+  const service = new RegistrationService({
+    db,
+    graph: {},
+    nfapiCredentialSync: {
+      async syncAccounts(items) {
+        assert.deepEqual(items.map((item) => item.id), [id]);
+        return {
+          attempted: 1,
+          synced: 0,
+          failed: 1,
+          items: [{ id, ok: false, error: "NFapi OAuth 账号不存在或不可用" }],
+        };
+      },
+    },
+    client: {
+      async listAccounts() { return { items: [account] }; },
+      async refreshAccountPlans(ids) {
+        assert.deepEqual(ids, [id]);
+        return { items: [{
+          account_id: id,
+          ok: true,
+          valid: true,
+          account_type: "free",
+          account_type_raw: "free",
+          account_type_source: "backend-api/accounts/check+subscriptions",
+          type_observed: true,
+          plan_detection_result: "confirmed",
+          plan_authority: "authoritative",
+          account_status: "active",
+          credential_status: "valid",
+          status_source: "backend-api/accounts/check+subscriptions",
+        }] };
+      },
+    },
+  });
+
+  const result = await service.refreshRegisteredAccountSignals({ ids: [id] });
+  assert.equal(result.checked, 1);
+  assert.equal(result.available, 1);
+  assert.deepEqual(result.nfapi_sync, { attempted: 1, synced: 0, failed: 1 });
+  assert.equal(result.accounts.items[0].availability, "available");
+  assert.doesNotMatch(JSON.stringify(result), /private-nfapi-sync-token/);
+});
+
 test("manual refresh checks the saved dynamic proxy before a new session and paid evidence wins", async (t) => {
   const db = testDatabase(t);
   addCompletedRegistration(db, 44, "upgraded@example.com");
@@ -773,7 +891,7 @@ test("manual refresh checks the saved dynamic proxy before a new session and pai
   assert.doesNotMatch(JSON.stringify(result), /pool-user|pool-secret|private-upgraded-token/);
 });
 
-test("manual refresh scans the linked mailbox before resolving inconclusive Plus status", async (t) => {
+test("manual refresh lets recent identity-matched Plus mail correct a confirmed Free result", async (t) => {
   const db = testDatabase(t);
   const email = "mail-confirmed-plus@example.com";
   const now = nowIso();
@@ -799,9 +917,9 @@ test("manual refresh scans the linked mailbox before resolving inconclusive Plus
       subscription_status, account_type, account_type_raw, code, reason, retryable,
       source, checked_at, attempted_at, created_at, updated_at
     ) VALUES (
-      '551', ?, 'inconclusive', 'active', 'valid', 'free', 'free', 'free',
-      'access_token_refresh_required', '等待实时套餐接口确认', 1,
-      'backend-api/accounts/check', ?, ?, ?, ?
+      '551', ?, 'confirmed', 'active', 'valid', 'free', 'free', 'free',
+      'ok', '状态检测成功', 0,
+      'backend-api/accounts/check+subscriptions', ?, ?, ?, ?
     )
   `).run(email, now, now, now, now);
 
@@ -820,9 +938,9 @@ test("manual refresh scans the linked mailbox before resolving inconclusive Plus
             senderAddress: "noreply@openai.com",
             recipient: email,
             recipients: [email],
-            subject: "ChatGPT - Your new plan",
-            preview: "You've successfully subscribed to ChatGPT Plus.",
-            body: "You've successfully subscribed to ChatGPT Plus.",
+            subject: "ChatGPT - 새로 이용하시는 플랜",
+            preview: "Manage: https://chatgpt.com/account/manage?account_id=workspace-551 ChatGPT Plus를 구독했습니다.",
+            body: "ChatGPT Plus Subscription. https://chatgpt.com/account/manage?account_id=workspace-551",
             receivedAt: now,
           }],
           items: [],
@@ -835,6 +953,7 @@ test("manual refresh scans the linked mailbox before resolving inconclusive Plus
           id: 551,
           platform: "chatgpt",
           email,
+          user_id: "workspace-551",
           lifecycle_status: "registered",
           validity_status: "valid",
           display_status: "registered",
@@ -855,13 +974,17 @@ test("manual refresh scans the linked mailbox before resolving inconclusive Plus
           ok: true,
           valid: true,
           account_type: "free",
-          type_observed: false,
-          plan_detection_result: "inconclusive",
-          detection_result: "inconclusive",
-          status_code: "access_token_refresh_required",
-          status_reason: "等待实时套餐接口确认",
-          status_retryable: true,
-          status_source: "backend-api/accounts/check",
+          account_type_raw: "free",
+          account_type_source: "backend-api/accounts/check+subscriptions",
+          type_observed: true,
+          plan_detection_result: "confirmed",
+          plan_authority: "authoritative",
+          account_type_confidence: "high",
+          detection_result: "confirmed",
+          status_code: "ok",
+          status_reason: "状态检测成功",
+          status_retryable: false,
+          status_source: "backend-api/accounts/check+subscriptions",
         }] };
       },
     },
@@ -875,7 +998,169 @@ test("manual refresh scans the linked mailbox before resolving inconclusive Plus
   assert.deepEqual(result.types, { plus: 1 });
   assert.equal(result.accounts.items[0].account_type, "plus");
   assert.equal(result.accounts.items[0].mail_plus_confirmed, true);
+  assert.equal(result.accounts.items[0].mail_plus_account_id, "workspace-551");
+  assert.equal(result.accounts.items[0].plus_at, now);
+  assert.equal(result.items[0].source, "mail/plus-confirmation");
   assert.doesNotMatch(JSON.stringify(result), /private-mail-confirmed-token/);
+});
+
+test("manual selected refresh marks an account deleted from its corresponding OpenAI email", async (t) => {
+  const db = testDatabase(t);
+  const id = 553;
+  const email = "mail-deleted-account@icloud.com";
+  const now = nowIso();
+  const source = db.prepare(`
+    INSERT INTO source_accounts
+      (provider, email, status, profile_key, created_at, updated_at)
+    VALUES ('icloud', 'source@icloud.com', 'connected', 'mail-deleted-account-source', ?, ?)
+  `).run(now, now);
+  const sourceId = Number(source.lastInsertRowid);
+  const address = db.prepare(`
+    INSERT INTO addresses
+      (account_id, address, kind, status, strategy, created_at, updated_at)
+    VALUES (?, ?, 'official', 'active', 'icloud_hide_my_email', ?, ?)
+  `).run(sourceId, email, now, now);
+  addCompletedRegistration(db, id, email);
+  db.prepare(`
+    UPDATE registration_jobs SET account_id = ?, address_id = ?, base_address_id = ?
+    WHERE external_account_id = ?
+  `).run(sourceId, Number(address.lastInsertRowid), Number(address.lastInsertRowid), String(id));
+
+  let scanCalls = 0;
+  const remoteAccount = {
+    id,
+    platform: "chatgpt",
+    email,
+    lifecycle_status: "subscribed",
+    validity_status: "valid",
+    display_status: "subscribed",
+    plan_state: "subscribed",
+    plan_name: "plus",
+    overview: {
+      valid: true,
+      account_type: "plus",
+      account_type_raw: "chatgptplusplan",
+      checked_at: now,
+      check_source: "backend-api/accounts/check",
+    },
+    credentials: [{ key: "access_token", value: "private-mail-deleted-token" }],
+  };
+  const service = new RegistrationService({
+    db,
+    graph: {
+      async scanInbox(account) {
+        scanCalls += 1;
+        assert.equal(account.id, sourceId);
+        return {
+          stage: "completed",
+          messages: [{
+            fingerprint: "mail-deleted-account-message",
+            graphMessageId: "mail-deleted-account-message",
+            senderAddress: "noreply@tm.openai.com",
+            recipient: email,
+            recipients: [email],
+            subject: "Your OpenAI account has been deleted",
+            preview: "Your account has been deleted or deactivated.",
+            body: "You do not have an account because it has been deleted or deactivated.",
+            receivedAt: now,
+          }],
+          items: [],
+        };
+      },
+    },
+    client: {
+      async listAccounts() { return { items: [remoteAccount] }; },
+      async refreshAccountPlans(ids) {
+        assert.deepEqual(ids, [id]);
+        return { items: [{
+          account_id: id,
+          ok: true,
+          valid: true,
+          account_type: "plus",
+          account_type_raw: "chatgptplusplan",
+          account_type_source: "backend-api/accounts/check",
+          type_observed: true,
+          plan_detection_result: "confirmed",
+          plan_authority: "authoritative",
+          account_status: "active",
+          credential_status: "valid",
+          status_source: "backend-api/accounts/check",
+        }] };
+      },
+    },
+  });
+
+  const result = await service.refreshRegisteredAccountSignals({ ids: [id] });
+  const account = result.accounts.items[0];
+  assert.equal(scanCalls, 1);
+  assert.equal(result.unavailable, 1);
+  assert.equal(result.items[0].code, "account_deleted");
+  assert.equal(result.items[0].source, "mail/account-deletion");
+  assert.equal(account.availability, "unavailable");
+  assert.equal(account.account_status, "deleted");
+  assert.equal(account.credential_status, "revoked");
+  assert.equal(account.status_code, "account_deleted");
+  assert.equal(account.status_source, "mail/account-deletion");
+  assert.match(account.status_reason, /对应邮箱收到 OpenAI/);
+  assert.doesNotMatch(JSON.stringify(result), /private-mail-deleted-token/);
+});
+
+test("confirmed Free is not overridden by Plus mail for another workspace", async (t) => {
+  const db = testDatabase(t);
+  const email = "mail-workspace-check@example.com";
+  const now = nowIso();
+  addCompletedRegistration(db, 552, email);
+  const source = db.prepare(`
+    INSERT INTO source_accounts
+      (provider, email, status, profile_key, created_at, updated_at)
+    VALUES ('inbox_link', ?, 'connected', 'mail-workspace-check-source', ?, ?)
+  `).run(email, now, now);
+  db.prepare(`
+    INSERT INTO mail_messages (
+      account_id, fingerprint, recipient_address, subject, preview, body,
+      received_at, created_at, updated_at
+    ) VALUES (?, 'mail-workspace-check-message', ?, 'ChatGPT - Your new plan', ?, ?, ?, ?, ?)
+  `).run(
+    Number(source.lastInsertRowid),
+    email,
+    "You've successfully subscribed to ChatGPT Plus. https://chatgpt.com/account/manage?account_id=workspace-other",
+    "ChatGPT Plus Subscription",
+    now,
+    now,
+    now,
+  );
+  const account = {
+    id: 552,
+    platform: "chatgpt",
+    email,
+    user_id: "workspace-552",
+    lifecycle_status: "registered",
+    validity_status: "valid",
+    display_status: "registered",
+    plan_state: "free",
+    plan_name: "free",
+    overview: {
+      valid: true,
+      account_type: "free",
+      account_type_raw: "free",
+      checked_at: now,
+      check_source: "backend-api/accounts/check+subscriptions",
+      password_status: "not_configured",
+    },
+    credentials: [{ key: "access_token", value: "private-workspace-check-token" }],
+  };
+  const service = new RegistrationService({
+    db,
+    graph: {},
+    client: { async listAccounts() { return { items: [account] }; } },
+  });
+
+  const result = await service.listRegisteredAccounts({ refreshUnchecked: false });
+
+  assert.equal(result.items[0].mail_plus_confirmed, true);
+  assert.equal(result.items[0].mail_plus_account_id, "workspace-other");
+  assert.equal(result.items[0].account_type, "free");
+  assert.equal(result.items[0].account_type_source, "account_type");
 });
 
 test("manual refresh retries a static proxy inconclusive result directly", async (t) => {
@@ -1252,6 +1537,76 @@ test("AT refresh uses the original route and email OTP action without RT or NFap
   assert.equal(result.access_token_refreshed, true);
   assert.equal(result.accounts.items[0].account_type, "plus");
   assert.equal(accessToken, "fresh-at");
+});
+
+test("AT refresh can use a selected proxy when the original route cannot be restored", async (t) => {
+  const db = testDatabase(t);
+  const id = 50;
+  const email = "refresh-at-other-region@example.com";
+  const proxies = [
+    "http://jp-user:jp-password@jp-proxy.example:8080",
+    "http://us-user:us-password@us-proxy.example:8080",
+  ];
+  addCompletedRegistration(db, id, email);
+  setSetting(db, "registration_proxy_pool", JSON.stringify(proxies));
+  db.prepare("UPDATE registration_jobs SET proxy_label = 'http://***@missing-proxy.example:8080' WHERE external_account_id = ?")
+    .run(String(id));
+  let accessToken = "expired-at";
+  const actions = [];
+  const account = () => ({
+    id,
+    platform: "chatgpt",
+    email,
+    display_status: "registered",
+    plan_state: "free",
+    overview: { password_status: "not_configured" },
+    credentials: [{ key: "access_token", value: accessToken }],
+  });
+  const service = new RegistrationService({
+    db,
+    graph: {},
+    client: {
+      async upsertOutlookEmailProviderSetting() { return { ok: true }; },
+      async getAccount() { return account(); },
+      async createAccountAction(accountId, actionId, params) {
+        actions.push({ accountId, actionId, params });
+        accessToken = "fresh-at";
+        return {
+          task_id: "refresh-at-other-region-task",
+          type: "platform_action",
+          platform: "chatgpt",
+          status: "succeeded",
+        };
+      },
+      async listAccounts() { return { items: [account()] }; },
+      async refreshAccountPlans() {
+        return { items: [{
+          account_id: id,
+          ok: true,
+          valid: true,
+          account_type: "free",
+          account_type_raw: "free",
+          type_observed: true,
+          plan_detection_result: "confirmed",
+          plan_authority: "verified",
+        }] };
+      },
+    },
+  });
+
+  const result = await service.refreshRegisteredAccountAccessToken(id, { proxy_selection: "proxy:1" });
+
+  assert.equal(result.access_token_refreshed, true);
+  assert.deepEqual(actions, [{
+    accountId: id,
+    actionId: "refresh_access_token",
+    params: { browser_mode: "camoufox_headless", proxy: proxies[1] },
+  }]);
+  await assert.rejects(
+    service.refreshRegisteredAccountAccessToken(id, { proxy_selection: "proxy:2" }),
+    (error) => error.status === 409 && /已不存在/.test(error.message),
+  );
+  assert.equal(actions.length, 1);
 });
 
 test("AT refresh marks an OpenAI-deleted account as confirmed invalid", async (t) => {
