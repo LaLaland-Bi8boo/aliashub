@@ -22,4 +22,4 @@ EXPOSE 18794
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=4 \
   CMD ["python", "-c", "import os,socket,urllib.request; r=urllib.request.Request('http://127.0.0.1:18794/api/health', headers={'X-Workbench-Password': os.environ.get('OPLL_WEB_PASSWORD', '')}); urllib.request.urlopen(r, timeout=3).read(); socket.create_connection(('127.0.0.1', int(os.environ.get('IPROCKET_BRIDGE_PORT', '18796'))), 3).close()"]
 
-CMD ["python", "-m", "payment_link_extractor.web"]
+CMD ["sh", "-c", "python iprocket_chain_bridge.py & exec python -m payment_link_extractor.web"]
