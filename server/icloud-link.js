@@ -43,14 +43,17 @@ function parseAccessUrl(value, email, allowedHosts) {
   if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password) {
     throw errorWithStatus("iCloud 取件 URL 无效", 400, "INVALID_ICLOUD_LINK_URL");
   }
-  if (!allowedHosts.has(parsed.hostname.toLowerCase())) {
-    throw errorWithStatus("iCloud 取件 URL 域名不受信任", 400, "UNTRUSTED_ICLOUD_LINK_HOST");
-  }
   const segments = parsed.pathname.split("/").filter(Boolean);
-  let scopedEmail = "";
-  try { scopedEmail = decodeURIComponent(segments[2] || ""); } catch { /* validated below */ }
-  if (segments.length !== 3 || segments[0] !== "messages" || !/^[a-z0-9_-]{16,}$/i.test(segments[1])
-    || normalizeEmail(scopedEmail) !== email || parsed.search || parsed.hash) {
+  // Legacy providers include the base mailbox in the path. Validate it when
+  // present, while allowing newer providers to use arbitrary paths/tokens.
+  if (segments.length >= 3 && segments[0].toLowerCase() === "messages") {
+    let scopedEmail = "";
+    try { scopedEmail = decodeURIComponent(segments[2] || ""); } catch { /* validated below */ }
+    if (normalizeEmail(scopedEmail) !== email) {
+      throw errorWithStatus("iCloud 取件 URL 与邮箱不匹配", 400, "ICLOUD_LINK_URL_MISMATCH");
+    }
+  }
+  if (!parsed.hostname) {
     throw errorWithStatus("iCloud 取件 URL 与邮箱不匹配", 400, "ICLOUD_LINK_URL_MISMATCH");
   }
   return canonicalAccessUrl(parsed).toString();
@@ -81,6 +84,12 @@ function endpointUrls(accessUrl) {
     list.searchParams.set("token", segments[1] || "");
     list.searchParams.set("limit", String(MAX_MESSAGES_PER_SCAN));
     return { list: list.toString(), detail: null, inlineDetails: true };
+  }
+  const legacyPath = segments.length === 3
+    && segments[0].toLowerCase() === "messages"
+    && /^[a-z0-9_-]{16,}$/i.test(segments[1]);
+  if (!legacyPath) {
+    return { list: accessUrl, detail: null, inlineDetails: true, directPage: true };
   }
   return {
     list: new URL(`/api/messages/${scope}`, root).toString(),
@@ -221,8 +230,23 @@ export class IcloudLinkClient {
   }
 
   async listMessages(accessUrl) {
+    const endpoints = endpointUrls(accessUrl);
+    if (endpoints.directPage) {
+      try {
+        const data = await this.jsonRequest(endpoints.list);
+        const items = Array.isArray(data?.items)
+          ? data.items
+          : (Array.isArray(data?.messages)
+            ? data.messages
+            : (Array.isArray(data?.data?.messages) ? data.data.messages : null));
+        if (items) return items.slice(0, MAX_MESSAGES_PER_SCAN);
+      } catch (error) {
+        if (error?.code !== "ICLOUD_LINK_REQUEST_FAILED" || error?.status !== 404) throw error;
+      }
+      return messagesFromAccessPage(await this.textRequest(accessUrl));
+    }
     try {
-      const data = await this.jsonRequest(endpointUrls(accessUrl).list);
+      const data = await this.jsonRequest(endpoints.list);
       const items = Array.isArray(data?.items)
         ? data.items
         : (Array.isArray(data?.data?.messages) ? data.data.messages : null);

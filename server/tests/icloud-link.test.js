@@ -13,6 +13,7 @@ const SCOPE = "test-scope-token-123456";
 const ACCESS_URL = `http://apple55.top/messages/${SCOPE}/${EMAIL}`;
 const CANONICAL_ACCESS_URL = `https://apple55.top/messages/${SCOPE}/${EMAIL}`;
 const LINLANYU_URL = `https://msg.linlanyu.com/messages/${SCOPE}/${EMAIL}`;
+const ICMAIL_URL = "https://icmail.2790cake.cn/mail/djEhI0-iiJ2H6C57S_6aPiLP6gzA9iBoG-Vv1PqswRgEI9kQb0j2CX0hU7tppPW3laK0sKTgN5tDbXVZWl4Ig1t57vfDXV2RF_T4Pbu_Ub5VDpSzkeHue-Rltx3FnQ3Oe-lrHvCV2TROvcd6qsCDyS4BlgzFw-8STMiLf1FCAhLGWCNDQ_J1";
 const CREDENTIAL = `${EMAIL}----${ACCESS_URL}`;
 
 function json(data, status = 200) {
@@ -44,7 +45,7 @@ function fixture(t) {
   return { db };
 }
 
-test("parses only matching allowlisted iCloud base-mailbox URLs", () => {
+test("parses legacy and arbitrary iCloud pickup URL formats", () => {
   assert.deepEqual(parseIcloudLinkCredentialLine(CREDENTIAL), {
     email: EMAIL,
     accessUrl: CANONICAL_ACCESS_URL,
@@ -60,18 +61,40 @@ test("parses only matching allowlisted iCloud base-mailbox URLs", () => {
     email: EMAIL,
     accessUrl: `http://mailbox.test/messages/${SCOPE}/${EMAIL}`,
   });
+  assert.deepEqual(parseIcloudLinkCredentialLine(`${EMAIL}----${ICMAIL_URL}`), {
+    email: EMAIL,
+    accessUrl: ICMAIL_URL,
+  });
   assert.throws(
     () => parseIcloudLinkCredentialLine(`base-address+tag@icloud.com----${ACCESS_URL}`),
     (error) => error.code === "UNSUPPORTED_ICLOUD_LINK_EMAIL",
   );
-  assert.throws(
-    () => parseIcloudLinkCredentialLine(`${EMAIL}----http://example.com/messages/${SCOPE}/${EMAIL}`),
-    (error) => error.code === "UNTRUSTED_ICLOUD_LINK_HOST",
-  );
+  assert.deepEqual(parseIcloudLinkCredentialLine(
+    `${EMAIL}----https://example.com/mail/random-token?source=icloud#inbox`,
+  ), {
+    email: EMAIL,
+    accessUrl: "https://example.com/mail/random-token?source=icloud#inbox",
+  });
   assert.throws(
     () => parseIcloudLinkCredentialLine(`${EMAIL}----http://apple55.top/messages/${SCOPE}/other@icloud.com`),
     (error) => error.code === "ICLOUD_LINK_URL_MISMATCH",
   );
+});
+
+test("imports arbitrary pickup pages with JSON message lists", async (t) => {
+  const { db } = fixture(t);
+  const client = new IcloudLinkClient({
+    db,
+    encryptionKey: "test-key",
+    fetchFn: async (url) => {
+      assert.equal(String(url), ICMAIL_URL);
+      return json({ items: [{ id: "mail-1", subject: "ChatGPT code 445566", body: "Use 445566" }] });
+    },
+  });
+  const imported = await client.importCredential(`${EMAIL}----${ICMAIL_URL}`);
+  const account = db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(imported.account.id);
+  const scanned = await client.scanInbox(account);
+  assert.equal(scanned.items[0].code, "445566");
 });
 
 test("encrypts iCloud access URLs and scans base64 HTML without using registration proxy options", async (t) => {
