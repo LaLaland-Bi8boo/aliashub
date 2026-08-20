@@ -97,6 +97,32 @@ test("imports arbitrary pickup pages with JSON message lists", async (t) => {
   assert.equal(scanned.items[0].code, "445566");
 });
 
+test("imports direct single-message JSON pickup links", async (t) => {
+  const { db } = fixture(t);
+  const client = new IcloudLinkClient({
+    db,
+    encryptionKey: "test-key",
+    fetchFn: async () => json({
+      email: EMAIL,
+      found: true,
+      message: {
+        uid: "icmail-uid-1",
+        code: "926423",
+        subject: "Your temporary ChatGPT verification code",
+        text: "Your verification code is 926423",
+        html: "<p>Your verification code is <strong>926423</strong></p>",
+        from: "noreply@openai.com",
+        timestamp: "2026-08-20T14:59:08.000Z",
+      },
+    }),
+  });
+  const imported = await client.importCredential(`${EMAIL}----${ICMAIL_URL}`);
+  const account = db.prepare("SELECT * FROM source_accounts WHERE id = ?").get(imported.account.id);
+  const scanned = await client.scanInbox(account);
+  assert.equal(scanned.items[0].code, "926423");
+  assert.equal(scanned.messages[0].senderAddress, "noreply@openai.com");
+});
+
 test("encrypts iCloud access URLs and scans base64 HTML without using registration proxy options", async (t) => {
   const { db } = fixture(t);
   const calls = [];

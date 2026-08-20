@@ -138,6 +138,25 @@ function messagesFromAccessPage(html) {
   return items;
 }
 
+function messagesFromDirectResponse(data) {
+  if (Array.isArray(data?.items)) return data.items;
+  if (Array.isArray(data?.messages)) return data.messages;
+  if (Array.isArray(data?.data?.messages)) return data.data.messages;
+  if (data?.found === false) return [];
+  if (data?.found === true && data?.message && typeof data.message === "object") {
+    const message = data.message;
+    const id = scalar(message.uid || message.id || message.timestamp || message.date || message.code).trim();
+    if (!id) throw errorWithStatus("iCloud 取件服务返回的邮件缺少唯一标识", 502, "INVALID_ICLOUD_LINK_RESPONSE");
+    return [{
+      ...message,
+      id,
+      from_address: message.from_address || message.from,
+      received_at: message.received_at || message.timestamp || message.date,
+    }];
+  }
+  return null;
+}
+
 function normalizeReceivedAt(value, timezoneOffset) {
   const raw = scalar(value).trim();
   const local = raw.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})$/);
@@ -234,11 +253,7 @@ export class IcloudLinkClient {
     if (endpoints.directPage) {
       try {
         const data = await this.jsonRequest(endpoints.list);
-        const items = Array.isArray(data?.items)
-          ? data.items
-          : (Array.isArray(data?.messages)
-            ? data.messages
-            : (Array.isArray(data?.data?.messages) ? data.data.messages : null));
+        const items = messagesFromDirectResponse(data);
         if (items) return items.slice(0, MAX_MESSAGES_PER_SCAN);
       } catch (error) {
         if (error?.code !== "ICLOUD_LINK_REQUEST_FAILED" || error?.status !== 404) throw error;
@@ -247,9 +262,7 @@ export class IcloudLinkClient {
     }
     try {
       const data = await this.jsonRequest(endpoints.list);
-      const items = Array.isArray(data?.items)
-        ? data.items
-        : (Array.isArray(data?.data?.messages) ? data.data.messages : null);
+      const items = messagesFromDirectResponse(data);
       if (!items) {
         throw errorWithStatus("iCloud 取件服务返回了无效的邮件列表", 502, "INVALID_ICLOUD_LINK_RESPONSE");
       }
